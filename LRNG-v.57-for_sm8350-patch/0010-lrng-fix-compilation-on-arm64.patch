@@ -1,0 +1,42 @@
+From 4821e8b65829bd3f6578dc3abe0eaa6fb80f3dfa Mon Sep 17 00:00:00 2001
+From: Juhyung Park <qkrwngud825@gmail.com>
+Date: Wed, 13 Mar 2024 19:20:32 +0900
+Subject: [PATCH 10/13] lrng: fix compilation on arm64
+
+Signed-off-by: Juhyung Park <qkrwngud825@gmail.com>
+Change-Id: I52cab964fe2fa8dc7f77ad945e3d6faa051418df
+(cherry picked from commit d84d4ee1a52ef72c79703ee09125e673342e2829)
+Signed-off-by: TogoFire <togofire@mailfence.com>
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/char/lrng/lrng_es_cpu.c | 1 -
+ drivers/char/lrng/lrng_es_mgr.c | 1 -
+ 2 files changed, 2 deletions(-)
+
+diff --git a/drivers/char/lrng/lrng_es_cpu.c b/drivers/char/lrng/lrng_es_cpu.c
+index 91b49777cd2c..98273a8f3165 100644
+--- a/drivers/char/lrng/lrng_es_cpu.c
++++ b/drivers/char/lrng/lrng_es_cpu.c
+@@ -11,7 +11,6 @@
+ #include <crypto/hash.h>
+ #include <linux/module.h>
+ #include <linux/random.h>
+-#include <asm/archrandom.h>
+ 
+ #include "lrng_definitions.h"
+ #include "lrng_es_aux.h"
+diff --git a/drivers/char/lrng/lrng_es_mgr.c b/drivers/char/lrng/lrng_es_mgr.c
+index e171ab4f01ce..58ab7cc84460 100644
+--- a/drivers/char/lrng/lrng_es_mgr.c
++++ b/drivers/char/lrng/lrng_es_mgr.c
+@@ -11,7 +11,6 @@
+ #include <linux/random.h>
+ #include <linux/utsname.h>
+ #include <linux/workqueue.h>
+-#include <asm/archrandom.h>
+ 
+ #include "lrng_drng_atomic.h"
+ #include "lrng_drng_mgr.h"
+-- 
+2.47.2
+

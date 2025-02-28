@@ -1,0 +1,99 @@
+From 713ba652eb21562131cee65bdf5fe4cdc8bcdbe0 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Wed, 16 Sep 2020 09:50:27 +0200
+Subject: [PATCH 07/13] crypto: move Jitter RNG header include dir
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ref: https://github.com/smuellerDD/lrng
+ref: https://www.chronox.de/lrng/
+
+To support the LRNG operation which uses the Jitter RNG separately
+from the kernel crypto API, the header file must be accessible to
+the LRNG code.
+
+CC: Torsten Duwe <duwe@lst.de>
+CC: "Eric W. Biederman" <ebiederm@xmission.com>
+CC: "Alexander E. Patrakov" <patrakov@gmail.com>
+CC: "Ahmed S. Darwish" <darwish.07@gmail.com>
+CC: "Theodore Y. Ts'o" <tytso@mit.edu>
+CC: Willy Tarreau <w@1wt.eu>
+CC: Matthew Garrett <mjg59@srcf.ucam.org>
+CC: Vito Caputo <vcaputo@pengaru.com>
+CC: Andreas Dilger <adilger.kernel@dilger.ca>
+CC: Jan Kara <jack@suse.cz>
+CC: Ray Strode <rstrode@redhat.com>
+CC: William Jon McCann <mccann@jhu.edu>
+CC: zhangjs <zachary@baishancloud.com>
+CC: Andy Lutomirski <luto@kernel.org>
+CC: Florian Weimer <fweimer@redhat.com>
+CC: Lennart Poettering <mzxreary@0pointer.de>
+CC: Nicolai Stange <nstange@suse.de>
+Reviewed-by: Alexander Lobakin <alobakin@pm.me>
+Tested-by: Alexander Lobakin <alobakin@pm.me>
+Reviewed-by: Roman Drahtmueller <draht@schaltsekun.de>
+Tested-by: Roman Drahtmüller <draht@schaltsekun.de>
+Tested-by: Marcelo Henrique Cerri <marcelo.cerri@canonical.com>
+Tested-by: Neil Horman <nhorman@redhat.com>
+Signed-off-by: Stephan Mueller <smueller@chronox.de>
+Change-Id: If1b447a257df3054c76e2b7c2645b5a0dc147eeb
+(cherry picked from commit 620536fb348c427c760408a1e41826abcd2c55a7)
+Signed-off-by: TogoFire <togofire@mailfence.com>
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+
+crypto: fix function override warning
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ crypto/jitterentropy-kcapi.c                        | 3 +--
+ crypto/jitterentropy.c                              | 2 +-
+ {crypto => include/crypto/internal}/jitterentropy.h | 2 --
+ 3 files changed, 2 insertions(+), 5 deletions(-)
+ rename {crypto => include/crypto/internal}/jitterentropy.h (94%)
+
+diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
+index b43684c0dade..ed21fab13da6 100644
+--- a/crypto/jitterentropy-kcapi.c
++++ b/crypto/jitterentropy-kcapi.c
+@@ -43,8 +43,7 @@
+ #include <linux/time.h>
+ #include <linux/crypto.h>
+ #include <crypto/internal/rng.h>
+-
+-#include "jitterentropy.h"
++#include <crypto/internal/jitterentropy.h>
+ 
+ /***************************************************************************
+  * Helper function
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 7204f097f4d6..51813fa519fe 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -117,7 +117,7 @@ struct rand_data {
+ #define JENT_EHEALTH		9 /* Health test failed during initialization */
+ #define JENT_ERCT		10 /* RCT failed during initialization */
+ 
+-#include "jitterentropy.h"
++#include <crypto/internal/jitterentropy.h>
+ 
+ /***************************************************************************
+  * Adaptive Proportion Test
+diff --git a/crypto/jitterentropy.h b/include/crypto/internal/jitterentropy.h
+similarity index 94%
+rename from crypto/jitterentropy.h
+rename to include/crypto/internal/jitterentropy.h
+index 2df1f788d77e..c83fff32d130 100644
+--- a/crypto/jitterentropy.h
++++ b/include/crypto/internal/jitterentropy.h
+@@ -1,7 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+-typedef unsigned long long      __u64;
+-
+ extern void *jent_zalloc(unsigned int len);
+ extern void jent_zfree(void *ptr);
+ extern int jent_fips_enabled(void);
+-- 
+2.47.2
+

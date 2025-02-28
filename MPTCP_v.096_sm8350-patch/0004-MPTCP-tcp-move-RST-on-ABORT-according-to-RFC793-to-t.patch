@@ -1,0 +1,46 @@
+From ac584113f7b627fe2897536583c8f3c26519a8cc Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 22 Feb 2025 19:59:06 +0000
+Subject: [PATCH 04/10] MPTCP -- tcp: move RST on ABORT according to RFC793 to
+ the header file
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ include/net/tcp.h | 2 +-
+ net/ipv4/tcp.c    | 7 -------
+ 2 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index ad0cabb94d11..d5f92c44817a 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -428,7 +428,7 @@ static inline bool tcp_need_reset(int state)
+ {
+ 	return (1 << state) &
+ 	       (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_FIN_WAIT1 |
+-		TCPF_FIN_WAIT2 | TCPF_SYN_RECV);
++		TCPF_FIN_WAIT2 | TCPF_SYN_RECV | TCPF_SYN_SENT);
+ }
+ 
+ int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb,
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index ee2ef9b0f315..4b676e128015 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2649,13 +2649,6 @@ EXPORT_SYMBOL(tcp_close);
+ 
+ /* These states need RST on ABORT according to RFC793 */
+ 
+-static inline bool tcp_need_reset(int state)
+-{
+-	return (1 << state) &
+-	       (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_FIN_WAIT1 |
+-		TCPF_FIN_WAIT2 | TCPF_SYN_RECV | TCPF_SYN_SENT);
+-}
+-
+ static void tcp_rtx_queue_purge(struct sock *sk)
+ {
+ 	struct rb_node *p = rb_first(&sk->tcp_rtx_queue);
+-- 
+2.47.2
+

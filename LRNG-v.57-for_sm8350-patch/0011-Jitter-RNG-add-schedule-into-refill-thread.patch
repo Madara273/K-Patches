@@ -1,0 +1,34 @@
+From 414231a44eac912d08abc5da5b2f23d22bf341ce Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Wed, 2 Oct 2024 14:33:09 -0700
+Subject: [PATCH 11/13] Jitter RNG: add schedule into refill thread
+
+ref: https://github.com/smuellerDD/lrng
+ref: https://www.chronox.de/lrng/
+
+The refill thread on some platforms may run longer due to the performance
+of the Jitter RNG. That may trigger a warning that a CPU is utilized for
+too long. Therefore, add a schedule call to yield the CPU if necessary.
+
+Reported-by: Bard
+Signed-off-by: Stephan Mueller <smueller@chronox.de>
+---
+ drivers/char/lrng/lrng_es_jent.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/char/lrng/lrng_es_jent.c b/drivers/char/lrng/lrng_es_jent.c
+index 250a8fc6e249..4b6cd5d50218 100644
+--- a/drivers/char/lrng/lrng_es_jent.c
++++ b/drivers/char/lrng/lrng_es_jent.c
+@@ -151,6 +151,8 @@ static void lrng_jent_async_monitor(struct work_struct *__unused)
+ 
+ 		pr_debug("Jitter RNG ES monitor: filled slot %u with %u bits of entropy\n",
+ 			 i, requested_bits);
++
++		schedule();
+ 	}
+ 
+ 	pr_debug("Jitter RNG block filling completed\n");
+-- 
+2.47.2
+

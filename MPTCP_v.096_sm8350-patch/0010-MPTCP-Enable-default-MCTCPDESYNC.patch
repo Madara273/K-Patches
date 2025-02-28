@@ -1,0 +1,26 @@
+From e9ee4780d4735c91da0f2e7eeb4fbd6fa11b0a25 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 22 Feb 2025 23:26:34 +0000
+Subject: [PATCH 10/10] MPTCP -- Enable default MCTCPDESYNC
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ net/ipv4/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
+index a8eb8a8d767f..0a62b68fb94b 100644
+--- a/net/ipv4/Kconfig
++++ b/net/ipv4/Kconfig
+@@ -734,7 +734,7 @@ config TCP_CONG_BALIA
+ config TCP_CONG_MCTCPDESYNC
+ 	tristate "DESYNCHRONIZED MCTCP CONGESTION CONTROL (EXPERIMENTAL)"
+ 	depends on MPTCP
+-	default n
++	default y
+ 	---help---
+ 	Desynchronized MultiChannel TCP Congestion Control. This is experimental
+ 	code that only supports single path and must have set mptcp_ndiffports
+-- 
+2.47.2
+
