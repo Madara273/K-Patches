@@ -1,0 +1,125 @@
+From fefa25a96387e1372f2fc27dde16551a3c59a6f4 Mon Sep 17 00:00:00 2001
+From: Mubashir Adnan Qureshi <mubashirq@google.com>
+Date: Wed, 26 Oct 2022 13:51:14 +0000
+Subject: [PATCH 21/29] tcp: add u32 counter in tcp_sock and an SNMP counter
+ for PLB
+
+A u32 counter is added to tcp_sock for counting the number of PLB
+triggered rehashes for a TCP connection. An SNMP counter is also
+added to count overall PLB triggered rehash events for a host. These
+counters are hooked up to PLB implementation for DCTCP.
+
+TCP_NLA_REHASH is added to SCM_TIMESTAMPING_OPT_STATS that reports
+the rehash attempts triggered due to PLB or timeouts. This gives
+a historical view of sustained congestion or timeouts experienced
+by the TCP connection.
+
+Signed-off-by: Mubashir Adnan Qureshi <mubashirq@google.com>
+Signed-off-by: Yuchung Cheng <ycheng@google.com>
+Signed-off-by: Neal Cardwell <ncardwell@google.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Tashfin Shakeer Rhythm <tashfinshakeerrhythm@gmail.com>
+(cherry picked from commit 75028bcf5c3258b7206a6d1c123e2a69606e578d)
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ include/linux/tcp.h       | 1 +
+ include/uapi/linux/snmp.h | 1 +
+ include/uapi/linux/tcp.h  | 1 +
+ net/ipv4/proc.c           | 1 +
+ net/ipv4/tcp.c            | 3 +++
+ net/ipv4/tcp_plb.c        | 2 ++
+ 6 files changed, 9 insertions(+)
+
+diff --git a/include/linux/tcp.h b/include/linux/tcp.h
+index 1e5d1be8c764..e4da8710c756 100644
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -397,6 +397,7 @@ struct tcp_sock {
+ 		u32		  probe_seq_start;
+ 		u32		  probe_seq_end;
+ 	} mtu_probe;
++	u32     plb_rehash;     /* PLB-triggered rehash attempts */
+ 	u32	mtu_info; /* We received an ICMP_FRAG_NEEDED / ICMPV6_PKT_TOOBIG
+ 			   * while socket was owned by user.
+ 			   */
+diff --git a/include/uapi/linux/snmp.h b/include/uapi/linux/snmp.h
+index b206b1c0ce21..ef754dca46dd 100644
+--- a/include/uapi/linux/snmp.h
++++ b/include/uapi/linux/snmp.h
+@@ -287,6 +287,7 @@ enum
+ 	LINUX_MIB_TCPFASTOPENPASSIVEALTKEY,	/* TCPFastOpenPassiveAltKey */
+ 	LINUX_MIB_TCPTIMEOUTREHASH,		/* TCPTimeoutRehash */
+ 	LINUX_MIB_TCPDUPLICATEDATAREHASH,	/* TCPDuplicateDataRehash */
++	LINUX_MIB_TCPPLBREHASH,			/* TCPPLBRehash */
+ 	__LINUX_MIB_MAX
+ };
+ 
+diff --git a/include/uapi/linux/tcp.h b/include/uapi/linux/tcp.h
+index e5c090afc60e..37ebd36432d9 100644
+--- a/include/uapi/linux/tcp.h
++++ b/include/uapi/linux/tcp.h
+@@ -312,6 +312,7 @@ enum {
+ 	TCP_NLA_REORD_SEEN,	/* reordering events seen */
+ 	TCP_NLA_SRTT,		/* smoothed RTT in usecs */
+ 	TCP_NLA_TIMEOUT_REHASH, /* Timeout-triggered rehash attempts */
++	TCP_NLA_REHASH,         /* PLB and timeout triggered rehash attempts */
+ };
+ 
+ /* for TCP_MD5SIG socket option */
+diff --git a/net/ipv4/proc.c b/net/ipv4/proc.c
+index 2580303249e2..c30e31c4a81d 100644
+--- a/net/ipv4/proc.c
++++ b/net/ipv4/proc.c
+@@ -291,6 +291,7 @@ static const struct snmp_mib snmp4_net_list[] = {
+ 	SNMP_MIB_ITEM("TCPFastOpenPassiveAltKey", LINUX_MIB_TCPFASTOPENPASSIVEALTKEY),
+ 	SNMP_MIB_ITEM("TcpTimeoutRehash", LINUX_MIB_TCPTIMEOUTREHASH),
+ 	SNMP_MIB_ITEM("TcpDuplicateDataRehash", LINUX_MIB_TCPDUPLICATEDATAREHASH),
++	SNMP_MIB_ITEM("TCPPLBRehash", LINUX_MIB_TCPPLBREHASH),
+ 	SNMP_MIB_SENTINEL
+ };
+ 
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 003af10a1ef5..faac20675282 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2701,6 +2701,7 @@ int tcp_disconnect(struct sock *sk, int flags)
+ 	tp->sacked_out = 0;
+ 	tp->tlp_high_seq = 0;
+ 	tp->last_oow_ack_time = 0;
++	tp->plb_rehash = 0;
+ 	/* There's a bubble in the pipe until at least the first ACK. */
+ 	tp->app_limited = ~0U;
+ 	tp->rate_app_limited = 1;
+@@ -3424,6 +3425,7 @@ static size_t tcp_opt_stats_get_size(void)
+ 		nla_total_size(sizeof(u32)) + /* TCP_NLA_REORD_SEEN */
+ 		nla_total_size(sizeof(u32)) + /* TCP_NLA_SRTT */
+ 		nla_total_size(sizeof(u16)) + /* TCP_NLA_TIMEOUT_REHASH */
++		nla_total_size(sizeof(u32)) + /* TCP_NLA_REHASH */
+ 		0;
+ }
+ 
+@@ -3480,6 +3482,7 @@ struct sk_buff *tcp_get_timestamping_opt_stats(const struct sock *sk)
+ 	nla_put_u32(stats, TCP_NLA_SRTT, tp->srtt_us >> 3);
+ 	nla_put_u16(stats, TCP_NLA_TIMEOUT_REHASH, tp->timeout_rehash);
+ 
++	nla_put_u32(stats, TCP_NLA_REHASH, tp->plb_rehash + tp->timeout_rehash);
+ 	return stats;
+ }
+ 
+diff --git a/net/ipv4/tcp_plb.c b/net/ipv4/tcp_plb.c
+index f4ced370acad..bb1a08fda113 100644
+--- a/net/ipv4/tcp_plb.c
++++ b/net/ipv4/tcp_plb.c
+@@ -79,6 +79,8 @@ void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb)
+ 
+ 	sk_rethink_txhash(sk);
+ 	plb->consec_cong_rounds = 0;
++	tcp_sk(sk)->plb_rehash++;
++	NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPPLBREHASH);
+ }
+ EXPORT_SYMBOL_GPL(tcp_plb_check_rehash);
+ 
+-- 
+2.51.0
+

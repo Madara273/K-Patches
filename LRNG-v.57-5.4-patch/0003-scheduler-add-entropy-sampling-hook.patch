@@ -1,0 +1,38 @@
+From c1d4db35a641a4440fdf5dae0ec737f63fa89c17 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sun, 15 Sep 2024 16:00:07 -0700
+Subject: [PATCH 03/13] scheduler - add entropy sampling hook
+
+ref: https://github.com/smuellerDD/lrng
+ref: https://www.chronox.de/lrng/
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ kernel/sched/core.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 889ea6a7eaea..19e5b859ec36 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -6,6 +6,8 @@
+  *
+  *  Copyright (C) 1991-2002  Linus Torvalds
+  */
++#include <linux/lrng.h>
++
+ #include "sched.h"
+ 
+ #include <linux/nospec.h>
+@@ -2382,6 +2384,8 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
+ {
+ 	struct rq *rq;
+ 
++	add_sched_randomness(p, cpu);
++
+ 	if (!schedstat_enabled())
+ 		return;
+ 
+-- 
+2.47.2
+

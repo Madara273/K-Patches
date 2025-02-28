@@ -1,0 +1,40 @@
+From af73320bcefb6f3039ba3ed48ec55c804af4bdcf Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Thu, 25 Dec 2025 01:01:14 +0000
+Subject: [PATCH 11/14] net: mptcp: add 5th argument according to new core api
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ net/core/filter.c | 2 +-
+ net/ipv4/tcp.c    | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/net/core/filter.c b/net/core/filter.c
+index 0f62af1de9cd..b1f3bfaa137d 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -4916,7 +4916,7 @@ static int _bpf_setsockopt(struct sock *sk, int level, int optname,
+ 			strncpy(name, optval, min_t(long, optlen,
+ 						    TCP_CA_NAME_MAX-1));
+ 			name[TCP_CA_NAME_MAX-1] = 0;
+-			ret = tcp_set_congestion_control(sk, name, false, true);
++			ret = tcp_set_congestion_control(sk, name, false, true, false);
+ 		} else {
+ 			struct inet_connection_sock *icsk = inet_csk(sk);
+ 			struct tcp_sock *tp = tcp_sk(sk);
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 1f2af6909584..697d61958da4 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -3031,7 +3031,7 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
+ 		name[val] = 0;
+ 
+ 		lock_sock(sk);
+-		err = tcp_set_congestion_control(sk, name, true,
++		err = tcp_set_congestion_control(sk, name, true, true,
+ 						 ns_capable(sock_net(sk)->user_ns,
+ 							    CAP_NET_ADMIN));
+ 		release_sock(sk);
+-- 
+2.51.0
+

@@ -1,0 +1,154 @@
+From 8a07881d281daf208542124315e2f4e6fd1b5bf6 Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Thu, 25 Mar 2021 11:08:13 -0700
+Subject: [PATCH 15/29] BACKPORT: sysctl: add proc_dou8vec_minmax()
+
+Networking has many sysctls that could fit in one u8.
+
+This patch adds proc_dou8vec_minmax() for this purpose.
+
+Note that the .extra1 and .extra2 fields are pointing
+to integers, because it makes conversions easier.
+
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[Tashar02: Backport to msm-5.4]
+Signed-off-by: Tashfin Shakeer Rhythm <tashfinshakeerrhythm@gmail.com>
+(cherry picked from commit 638d6de48ce7f82607dbeec64a9f77bcf321e115)
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ fs/proc/proc_sysctl.c  |  6 ++++
+ include/linux/sysctl.h |  2 ++
+ kernel/sysctl.c        | 65 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 73 insertions(+)
+
+diff --git a/fs/proc/proc_sysctl.c b/fs/proc/proc_sysctl.c
+index 145abe711fd5..3ae134ef62b1 100644
+--- a/fs/proc/proc_sysctl.c
++++ b/fs/proc/proc_sysctl.c
+@@ -1142,6 +1142,11 @@ static int sysctl_check_table_array(const char *path, struct ctl_table *table)
+ 			err |= sysctl_err(path, table, "array not allowed");
+ 	}
+ 
++	if (table->proc_handler == proc_dou8vec_minmax) {
++		if (table->maxlen != sizeof(u8))
++			err |= sysctl_err(path, table, "array not allowed");
++	}
++
+ 	return err;
+ }
+ 
+@@ -1157,6 +1162,7 @@ static int sysctl_check_table(const char *path, struct ctl_table *table)
+ 		    (table->proc_handler == proc_douintvec) ||
+ 		    (table->proc_handler == proc_douintvec_minmax) ||
+ 		    (table->proc_handler == proc_dointvec_minmax) ||
++		    (table->proc_handler == proc_dou8vec_minmax) ||
+ 		    (table->proc_handler == proc_dointvec_jiffies) ||
+ 		    (table->proc_handler == proc_dointvec_userhz_jiffies) ||
+ 		    (table->proc_handler == proc_dointvec_ms_jiffies) ||
+diff --git a/include/linux/sysctl.h b/include/linux/sysctl.h
+index 3b66a8078ef2..0646fcd2ceab 100644
+--- a/include/linux/sysctl.h
++++ b/include/linux/sysctl.h
+@@ -60,6 +60,8 @@ int proc_dointvec_ms_jiffies(struct ctl_table *, int, void *, size_t *,
+ 		loff_t *);
+ int proc_doulongvec_minmax(struct ctl_table *, int, void *, size_t *,
+ 		loff_t *);
++int proc_dou8vec_minmax(struct ctl_table *table, int write, void *buffer,
++			       size_t *lenp, loff_t *ppos);
+ int proc_doulongvec_ms_jiffies_minmax(struct ctl_table *table, int,
+ 				      void *, size_t *, loff_t *);
+ int proc_do_large_bitmap(struct ctl_table *, int, void *, size_t *, loff_t *);
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 8dcce286f0c7..f116d635406d 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -3460,6 +3460,64 @@ static int do_proc_dointvec_ms_jiffies_conv(bool *negp, unsigned long *lvalp,
+ 	return 0;
+ }
+ 
++/**
++ * proc_dou8vec_minmax - read a vector of unsigned chars with min/max values
++ * @table: the sysctl table
++ * @write: %TRUE if this is a write to the sysctl file
++ * @buffer: the user buffer
++ * @lenp: the size of the user buffer
++ * @ppos: file position
++ *
++ * Reads/writes up to table->maxlen/sizeof(u8) unsigned chars
++ * values from/to the user buffer, treated as an ASCII string. Negative
++ * strings are not allowed.
++ *
++ * This routine will ensure the values are within the range specified by
++ * table->extra1 (min) and table->extra2 (max).
++ *
++ * Returns 0 on success or an error on write when the range check fails.
++ */
++int proc_dou8vec_minmax(struct ctl_table *table, int write,
++			void __user *buffer, size_t *lenp, loff_t *ppos)
++{
++	struct ctl_table tmp;
++	unsigned int min = 0, max = 255U, val;
++	u8 *data = table->data;
++	struct do_proc_douintvec_minmax_conv_param param = {
++		.min = &min,
++		.max = &max,
++	};
++	int res;
++
++	/* Do not support arrays yet. */
++	if (table->maxlen != sizeof(u8))
++		return -EINVAL;
++
++	if (table->extra1) {
++		min = *(unsigned int *) table->extra1;
++		if (min > 255U)
++			return -EINVAL;
++	}
++	if (table->extra2) {
++		max = *(unsigned int *) table->extra2;
++		if (max > 255U)
++			return -EINVAL;
++	}
++
++	tmp = *table;
++
++	tmp.maxlen = sizeof(val);
++	tmp.data = &val;
++	val = *data;
++	res = do_proc_douintvec(&tmp, write, buffer, lenp, ppos,
++				do_proc_douintvec_minmax_conv, &param);
++	if (res)
++		return res;
++	if (write)
++		*data = val;
++	return 0;
++}
++
+ /**
+  * proc_dointvec_jiffies - read a vector of integers as seconds
+  * @table: the sysctl table
+@@ -3790,6 +3848,12 @@ int proc_douintvec_minmax(struct ctl_table *table, int write,
+ 	return -ENOSYS;
+ }
+ 
++int proc_dou8vec_minmax(struct ctl_table *table, int write,
++			void __user *buffer, size_t *lenp, loff_t *ppos)
++{
++	return -ENOSYS;
++}
++
+ int proc_dointvec_jiffies(struct ctl_table *table, int write,
+ 		    void *buffer, size_t *lenp, loff_t *ppos)
+ {
+@@ -3877,6 +3941,7 @@ int proc_do_static_key(struct ctl_table *table, int write,
+  */
+ EXPORT_SYMBOL(proc_dointvec);
+ EXPORT_SYMBOL(proc_douintvec);
++EXPORT_SYMBOL(proc_dou8vec_minmax);
+ EXPORT_SYMBOL(proc_dointvec_jiffies);
+ EXPORT_SYMBOL(proc_dointvec_minmax);
+ EXPORT_SYMBOL_GPL(proc_douintvec_minmax);
+-- 
+2.51.0
+

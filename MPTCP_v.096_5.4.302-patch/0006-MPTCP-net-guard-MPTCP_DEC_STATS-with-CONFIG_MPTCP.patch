@@ -1,0 +1,27 @@
+From d028482068183cd00af11999db89f095004f235d Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Tue, 13 Oct 2020 17:35:46 +0900
+Subject: [PATCH 06/14] MPTCP: net: guard MPTCP_DEC_STATS with CONFIG_MPTCP
+
+---
+ net/ipv4/tcp.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index a4c8672d56e2..8d100eca6e99 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2368,8 +2368,10 @@ void tcp_set_state(struct sock *sk, int state)
+ 	default:
+ 		if (oldstate == TCP_ESTABLISHED || oldstate == TCP_CLOSE_WAIT) {
+ 			TCP_DEC_STATS(sock_net(sk), TCP_MIB_CURRESTAB);
++#ifdef CONFIG_MPTCP
+ 			if (is_meta_sk(sk))
+ 				MPTCP_DEC_STATS(sock_net(sk), MPTCP_MIB_CURRESTAB);
++#endif
+ 		}
+ 	}
+ 
+-- 
+2.51.0
+

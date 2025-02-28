@@ -1,0 +1,295 @@
+From d28290e13698c77e980d4d71199b9eda5a168ce8 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Thu, 11 Dec 2025 04:04:51 +0000
+Subject: [PATCH 09/14] MPTCP -- Update MPTCP v.96 from
+ https://github.com/multipath-tcp/mptcp
+
+---
+ include/net/tcp.h         |  1 +
+ net/ipv4/tcp.c            | 36 ++++++++++++++++++++++--------------
+ net/ipv4/tcp_input.c      |  5 +++--
+ net/ipv6/ipv6_sockglue.c  |  2 +-
+ net/ipv6/tcp_ipv6.c       |  4 ++--
+ net/mptcp/mptcp_ctrl.c    | 21 +++++++++++++--------
+ net/mptcp/mptcp_input.c   |  9 +++++++--
+ net/mptcp/mptcp_netlink.c |  2 +-
+ net/mptcp/mptcp_output.c  |  2 +-
+ 9 files changed, 51 insertions(+), 31 deletions(-)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index b19bdba7d540..b02bec2c7b49 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -526,6 +526,7 @@ void tcp_update_metrics(struct sock *sk);
+ void tcp_init_metrics(struct sock *sk);
+ void tcp_metrics_init(void);
+ bool tcp_peer_is_proven(struct request_sock *req, struct dst_entry *dst);
++void __tcp_close(struct sock *sk, long timeout);
+ void tcp_close(struct sock *sk, long timeout);
+ void tcp_init_sock(struct sock *sk);
+ void tcp_init_transfer(struct sock *sk, int bpf_op, struct sk_buff *skb);
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 19b135badead..1f2af6909584 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2352,8 +2352,11 @@ void tcp_set_state(struct sock *sk, int state)
+ 		}
+ 		break;
+ 	case TCP_CLOSE_WAIT:
+-		if (oldstate == TCP_SYN_RECV)
++		if (oldstate == TCP_SYN_RECV) {
+ 			TCP_INC_STATS(sock_net(sk), TCP_MIB_CURRESTAB);
++			if (is_meta_sk(sk))
++				MPTCP_INC_STATS(sock_net(sk), MPTCP_MIB_CURRESTAB);
++		}
+ 		break;
+ 
+ 	case TCP_CLOSE:
+@@ -2456,24 +2459,12 @@ bool tcp_check_oom(struct sock *sk, int shift)
+ 	return too_many_orphans || out_of_socket_memory;
+ }
+ 
+-void tcp_close(struct sock *sk, long timeout)
++void __tcp_close(struct sock *sk, long timeout)
+ {
+ 	bool data_was_unread = false;
+ 	struct sk_buff *skb;
+ 	int state;
+ 
+-	if (is_meta_sk(sk)) {
+-		/* TODO: Currently forcing timeout to 0 because
+-		 * sk_stream_wait_close will complain during lockdep because
+-		 * of the mpcb_mutex (circular lock dependency through
+-		 * inet_csk_listen_stop()).
+-		 * We should find a way to get rid of the mpcb_mutex.
+-		 */
+-		mptcp_close(sk, 0);
+-		return;
+-	}
+-
+-	lock_sock(sk);
+ 	WRITE_ONCE(sk->sk_shutdown, SHUTDOWN_MASK);
+ 
+ 	if (sk->sk_state == TCP_LISTEN) {
+@@ -2639,6 +2630,23 @@ void tcp_close(struct sock *sk, long timeout)
+ out:
+ 	bh_unlock_sock(sk);
+ 	local_bh_enable();
++}
++
++void tcp_close(struct sock *sk, long timeout)
++{
++	if (is_meta_sk(sk)) {
++		/* TODO: Currently forcing timeout to 0 because
++		 * sk_stream_wait_close will complain during lockdep because
++		 * of the mpcb_mutex (circular lock dependency through
++		 * inet_csk_listen_stop()).
++		 * We should find a way to get rid of the mpcb_mutex.
++		 */
++		mptcp_close(sk, 0);
++		return;
++	}
++
++	lock_sock(sk);
++	__tcp_close(sk, timeout);
+ 	release_sock(sk);
+ 	if (!sk->sk_net_refcnt)
+ 		inet_csk_clear_xmit_timers_sync(sk);
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index 41f9206d495f..8e0e93f01601 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -287,6 +287,7 @@ void tcp_enter_quickack_mode(struct sock *sk, unsigned int max_quickacks)
+ 	inet_csk_exit_pingpong_mode(sk);
+ 	icsk->icsk_ack.ato = TCP_ATO_MIN;
+ }
++EXPORT_SYMBOL(tcp_enter_quickack_mode);
+ 
+ /* Send ACKs quickly, if "quick" count is not exhausted
+  * and the session is not interactive.
+@@ -6611,6 +6612,8 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
+ 
+ 		if (tp->rx_opt.tstamp_ok)
+ 			tp->advmss -= TCPOLEN_TSTAMP_ALIGNED;
++		if (mptcp(tp))
++			tp->advmss -= MPTCP_SUB_LEN_DSM_ALIGN;
+ 
+ 		if (req) {
+ 			tcp_rcv_synrecv_state_fastopen(sk);
+@@ -6638,8 +6641,6 @@ int tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
+ 
+ 		if (tp->rx_opt.tstamp_ok)
+ 			tp->advmss -= TCPOLEN_TSTAMP_ALIGNED;
+-		if (mptcp(tp))
+-			tp->advmss -= MPTCP_SUB_LEN_DSM_ALIGN;
+ 
+ 		if (!inet_csk(sk)->icsk_ca_ops->cong_control)
+ 			tcp_update_pacing_rate(sk);
+diff --git a/net/ipv6/ipv6_sockglue.c b/net/ipv6/ipv6_sockglue.c
+index 73f107254f64..808f87de3df7 100644
+--- a/net/ipv6/ipv6_sockglue.c
++++ b/net/ipv6/ipv6_sockglue.c
+@@ -228,7 +228,7 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
+ 				WRITE_ONCE(sk->sk_prot, &tcp_prot);
+ #ifdef CONFIG_MPTCP
+ 				if (sock_flag(sk, SOCK_MPTCP))
+-					icsk->icsk_af_ops = &mptcp_v4_specific;
++					WRITE_ONCE(icsk->icsk_af_ops, &mptcp_v4_specific);
+ 				else
+ #endif
+ 				/* Paired with READ_ONCE() in tcp_(get|set)sockopt() */
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index 2b444f27a9ac..7d3a531810af 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -233,7 +233,7 @@ int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
+ 
+ #ifdef CONFIG_MPTCP
+ 		if (sock_flag(sk, SOCK_MPTCP))
+-			icsk->icsk_af_ops = &mptcp_v6_mapped;
++			WRITE_ONCE(icsk->icsk_af_ops, &mptcp_v6_mapped);
+ 		else
+ #endif
+ 		/* Paired with READ_ONCE() in tcp_(get|set)sockopt() */
+@@ -249,7 +249,7 @@ int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
+ 			icsk->icsk_ext_hdr_len = exthdrlen;
+ #ifdef CONFIG_MPTCP
+ 			if (sock_flag(sk, SOCK_MPTCP))
+-				icsk->icsk_af_ops = &mptcp_v6_specific;
++				WRITE_ONCE(icsk->icsk_af_ops, &mptcp_v6_specific);
+ 			else
+ #endif
+ 			/* Paired with READ_ONCE() in tcp_(get|set)sockopt() */
+diff --git a/net/mptcp/mptcp_ctrl.c b/net/mptcp/mptcp_ctrl.c
+index 8fa24e1a32b9..5e6cf373dab1 100644
+--- a/net/mptcp/mptcp_ctrl.c
++++ b/net/mptcp/mptcp_ctrl.c
+@@ -411,14 +411,15 @@ void mptcp_enable_sock(struct sock *sk)
+ 
+ 		/* Necessary here, because MPTCP can be enabled/disabled through
+ 		 * a setsockopt.
++		 * Paired with READ_ONCE() in tcp_(get|set)sockopt()
+ 		 */
+ 		if (sk->sk_family == AF_INET)
+-			inet_csk(sk)->icsk_af_ops = &mptcp_v4_specific;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &mptcp_v4_specific);
+ #if IS_ENABLED(CONFIG_IPV6)
+ 		else if (mptcp_v6_is_v4_mapped(sk))
+-			inet_csk(sk)->icsk_af_ops = &mptcp_v6_mapped;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &mptcp_v6_mapped);
+ 		else
+-			inet_csk(sk)->icsk_af_ops = &mptcp_v6_specific;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &mptcp_v6_specific);
+ #endif
+ 
+ 		mptcp_enable_static_key();
+@@ -432,14 +433,15 @@ void mptcp_disable_sock(struct sock *sk)
+ 
+ 		/* Necessary here, because MPTCP can be enabled/disabled through
+ 		 * a setsockopt.
++		 * Paired with READ_ONCE() in tcp_(get|set)sockopt()
+ 		 */
+ 		if (sk->sk_family == AF_INET)
+-			inet_csk(sk)->icsk_af_ops = &ipv4_specific;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &ipv4_specific);
+ #if IS_ENABLED(CONFIG_IPV6)
+ 		else if (mptcp_v6_is_v4_mapped(sk))
+-			inet_csk(sk)->icsk_af_ops = &ipv6_mapped;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &ipv6_mapped);
+ 		else
+-			inet_csk(sk)->icsk_af_ops = &ipv6_specific;
++			WRITE_ONCE(inet_csk(sk)->icsk_af_ops, &ipv6_specific);
+ #endif
+ 	}
+ }
+@@ -2093,7 +2095,7 @@ static void mptcp_sub_close_doit(struct sock *sk)
+ 		tp->closing = 1;
+ 		tcp_close(sk, 0);
+ 	} else if (tcp_close_state(sk)) {
+-		sk->sk_shutdown |= SEND_SHUTDOWN;
++		WRITE_ONCE(sk->sk_shutdown, sk->sk_shutdown | SEND_SHUTDOWN);
+ 		tcp_send_fin(sk);
+ 	}
+ }
+@@ -2238,7 +2240,7 @@ void mptcp_close(struct sock *meta_sk, long timeout)
+ 		/* Detach the mpcb from the token hashtable */
+ 		mptcp_hash_remove_bh(meta_tp);
+ 
+-	meta_sk->sk_shutdown = SHUTDOWN_MASK;
++	WRITE_ONCE(meta_sk->sk_shutdown, SHUTDOWN_MASK);
+ 	/* We need to flush the recv. buffs.  We do this only on the
+ 	 * descriptor close, not protocol-sourced closes, because the
+ 	 * reader process may not have drained the data yet!
+@@ -2332,6 +2334,9 @@ void mptcp_close(struct sock *meta_sk, long timeout)
+ 	/* It is the last release_sock in its life. It will remove backlog. */
+ 	release_sock(meta_sk);
+ 
++	if (!meta_sk->sk_net_refcnt)
++		inet_csk_clear_xmit_timers_sync(meta_sk);
++
+ 	/* Now socket is owned by kernel and we acquire BH lock
+ 	 * to finish close. No need to check for user refs.
+ 	 */
+diff --git a/net/mptcp/mptcp_input.c b/net/mptcp/mptcp_input.c
+index d5c1e8cec703..8c65d8c130bd 100644
+--- a/net/mptcp/mptcp_input.c
++++ b/net/mptcp/mptcp_input.c
+@@ -203,7 +203,7 @@ static int mptcp_rcv_state_process(struct sock *meta_sk, struct sock *sk,
+ 			break;
+ 
+ 		tcp_set_state(meta_sk, TCP_FIN_WAIT2);
+-		meta_sk->sk_shutdown |= SEND_SHUTDOWN;
++		WRITE_ONCE(meta_sk->sk_shutdown, meta_sk->sk_shutdown | SEND_SHUTDOWN);
+ 
+ 		dst = __sk_dst_get(sk);
+ 		if (dst)
+@@ -1362,7 +1362,7 @@ void mptcp_fin(struct sock *meta_sk)
+ 	inet_csk_schedule_ack(sk);
+ 
+ 	if (!mpcb->in_time_wait) {
+-		meta_sk->sk_shutdown |= RCV_SHUTDOWN;
++		WRITE_ONCE(meta_sk->sk_shutdown, meta_sk->sk_shutdown | RCV_SHUTDOWN);
+ 		sock_set_flag(meta_sk, SOCK_DONE);
+ 		state = meta_sk->sk_state;
+ 	} else {
+@@ -2477,6 +2477,11 @@ static void mptcp_rcv_synsent_fastopen(struct sock *meta_sk)
+ 			_mptcp_rcv_synsent_fastopen(meta_sk, skb_rtx_head,
+ 						    true);
+ 		}
++
++		if (master_tp->total_retrans)
++			master_tp->fastopen_client_fail = TFO_SYN_RETRANSMITTED;
++		else
++			master_tp->fastopen_client_fail = TFO_DATA_NOT_ACKED;
+ 	}
+ 
+ 	/* We can advance write_seq by the number of bytes unacknowledged
+diff --git a/net/mptcp/mptcp_netlink.c b/net/mptcp/mptcp_netlink.c
+index c59f5d0f3547..b39479818417 100644
+--- a/net/mptcp/mptcp_netlink.c
++++ b/net/mptcp/mptcp_netlink.c
+@@ -682,7 +682,7 @@ mptcp_nl_genl_announce(struct sk_buff *skb, struct genl_info *info)
+ 
+ 	/* Only version 0 can send ADD_ADDR right at the beginning */
+ 	if (mpcb->mptcp_ver < MPTCP_VERSION_1 ||
+-	    tcp_sk(meta_sk)->mptcp->fully_established) {
++	    (mpcb->master_sk && tcp_sk(mpcb->master_sk)->mptcp->fully_established)) {
+ 		rcu_read_lock_bh();
+ 		subsk = mptcp_select_ack_sock(meta_sk);
+ 		if (subsk)
+diff --git a/net/mptcp/mptcp_output.c b/net/mptcp/mptcp_output.c
+index 75e25ac60d06..59490083a5e8 100644
+--- a/net/mptcp/mptcp_output.c
++++ b/net/mptcp/mptcp_output.c
+@@ -392,7 +392,7 @@ static void mptcp_combine_dfin(const struct sk_buff *skb,
+ 
+ combine:
+ 	if (tcp_close_state(subsk)) {
+-		subsk->sk_shutdown |= SEND_SHUTDOWN;
++		WRITE_ONCE(subsk->sk_shutdown, subsk->sk_shutdown | SEND_SHUTDOWN);
+ 		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
+ 	}
+ }
+-- 
+2.51.0
+

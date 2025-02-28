@@ -1,0 +1,117 @@
+From 6e1c58961d28266eb15cc55ba112e506d81f3738 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 14 Sep 2024 13:32:29 -0700
+Subject: [PATCH 01/13] Apply Initial patches for LRNG.
+
+ref: https://github.com/smuellerDD/lrng
+ref: https://www.chronox.de/lrng/
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ crypto/jitterentropy-kcapi.c |  8 +-------
+ crypto/jitterentropy.c       |  7 +------
+ crypto/jitterentropy.h       | 19 +++++++++++++++++++
+ include/crypto/sha.h         | 10 ++++++++++
+ kernel/sched/core.c          |  4 ++++
+ 5 files changed, 35 insertions(+), 13 deletions(-)
+ create mode 100644 crypto/jitterentropy.h
+
+diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
+index 701b8d86ab49..a5ce8f96790f 100644
+--- a/crypto/jitterentropy-kcapi.c
++++ b/crypto/jitterentropy-kcapi.c
+@@ -44,13 +44,7 @@
+ #include <linux/crypto.h>
+ #include <crypto/internal/rng.h>
+ 
+-struct rand_data;
+-int jent_read_entropy(struct rand_data *ec, unsigned char *data,
+-		      unsigned int len);
+-int jent_entropy_init(void);
+-struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
+-					       unsigned int flags);
+-void jent_entropy_collector_free(struct rand_data *entropy_collector);
++#include "jitterentropy.h"
+ 
+ /***************************************************************************
+  * Helper function
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 77fa2120fe0c..e342db4084d3 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -103,12 +103,7 @@ struct rand_data {
+  * Helper functions
+  ***************************************************************************/
+ 
+-void jent_get_nstime(__u64 *out);
+-void *jent_zalloc(unsigned int len);
+-void jent_zfree(void *ptr);
+-int jent_fips_enabled(void);
+-void jent_panic(char *s);
+-void jent_memcpy(void *dest, const void *src, unsigned int n);
++#include "jitterentropy.h"
+ 
+ /**
+  * Update of the loop count used for the next round of
+diff --git a/crypto/jitterentropy.h b/crypto/jitterentropy.h
+new file mode 100644
+index 000000000000..2df1f788d77e
+--- /dev/null
++++ b/crypto/jitterentropy.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++typedef unsigned long long      __u64;
++
++extern void *jent_zalloc(unsigned int len);
++extern void jent_zfree(void *ptr);
++extern int jent_fips_enabled(void);
++extern void jent_panic(char *s);
++extern void jent_memcpy(void *dest, const void *src, unsigned int n);
++extern void jent_get_nstime(__u64 *out);
++
++struct rand_data;
++extern int jent_entropy_init(void);
++extern int jent_read_entropy(struct rand_data *ec, unsigned char *data,
++			     unsigned int len);
++
++extern struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
++						      unsigned int flags);
++extern void jent_entropy_collector_free(struct rand_data *entropy_collector);
+diff --git a/include/crypto/sha.h b/include/crypto/sha.h
+index 5c2132c71900..09a4d3641178 100644
+--- a/include/crypto/sha.h
++++ b/include/crypto/sha.h
+@@ -159,4 +159,14 @@ extern int sha224_update(struct sha256_state *sctx, const u8 *input,
+ 			 unsigned int length);
+ extern int sha224_final(struct sha256_state *sctx, u8 *hash);
+ 
++/*
++ * An implementation of SHA-1's compression function.  Don't use in new code!
++ * You shouldn't be using SHA-1, and even if you *have* to use SHA-1, this isn't
++ * the correct way to hash something with SHA-1 (use crypto_shash instead).
++ */
++#define SHA1_DIGEST_WORDS	(SHA1_DIGEST_SIZE / 4)
++#define SHA1_WORKSPACE_WORDS	16
++void sha_init(__u32 *buf);
++void sha_transform(__u32 *digest, const char *data, __u32 *W);
++
+ #endif
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 889ea6a7eaea..4311d709fa8b 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -6,6 +6,10 @@
+  *
+  *  Copyright (C) 1991-2002  Linus Torvalds
+  */
++#include <linux/highmem.h>
++#include <linux/hrtimer_api.h>
++#include <linux/ktime_api.h>
++
+ #include "sched.h"
+ 
+ #include <linux/nospec.h>
+-- 
+2.47.2
+

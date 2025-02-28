@@ -1,0 +1,59 @@
+From b1081700abe12cbaf52e8770645d4df0e055180b Mon Sep 17 00:00:00 2001
+From: Juhyung Park <qkrwngud825@gmail.com>
+Date: Wed, 13 Mar 2024 22:33:51 +0900
+Subject: [PATCH 08/14] Revert "tcp: factor out __tcp_close() helper"
+
+This reverts commit 5a9dc14df2ef3771d62e41a32c4a72417d845c07.
+
+Incompatible with mptcp v0.96 and an unnecessary backport.
+Just get rid of the change.
+
+Change-Id: Ia83aafab054a4319dc2e7b74c056dc1c71f1c04e
+Signed-off-by: Juhyung Park <qkrwngud825@gmail.com>
+Signed-off-by: TogoFire <togofire@mailfence.com>
+---
+ include/net/tcp.h | 1 -
+ net/ipv4/tcp.c    | 8 +-------
+ 2 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index b02bec2c7b49..b19bdba7d540 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -526,7 +526,6 @@ void tcp_update_metrics(struct sock *sk);
+ void tcp_init_metrics(struct sock *sk);
+ void tcp_metrics_init(void);
+ bool tcp_peer_is_proven(struct request_sock *req, struct dst_entry *dst);
+-void __tcp_close(struct sock *sk, long timeout);
+ void tcp_close(struct sock *sk, long timeout);
+ void tcp_init_sock(struct sock *sk);
+ void tcp_init_transfer(struct sock *sk, int bpf_op, struct sk_buff *skb);
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 8d100eca6e99..19b135badead 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -2456,7 +2456,7 @@ bool tcp_check_oom(struct sock *sk, int shift)
+ 	return too_many_orphans || out_of_socket_memory;
+ }
+ 
+-void __tcp_close(struct sock *sk, long timeout)
++void tcp_close(struct sock *sk, long timeout)
+ {
+ 	bool data_was_unread = false;
+ 	struct sk_buff *skb;
+@@ -2639,12 +2639,6 @@ void __tcp_close(struct sock *sk, long timeout)
+ out:
+ 	bh_unlock_sock(sk);
+ 	local_bh_enable();
+-}
+-
+-void tcp_close(struct sock *sk, long timeout)
+-{
+-	lock_sock(sk);
+-	__tcp_close(sk, timeout);
+ 	release_sock(sk);
+ 	if (!sk->sk_net_refcnt)
+ 		inet_csk_clear_xmit_timers_sync(sk);
+-- 
+2.51.0
+

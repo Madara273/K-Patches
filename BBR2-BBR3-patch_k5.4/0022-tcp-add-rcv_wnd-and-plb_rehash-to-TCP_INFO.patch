@@ -1,0 +1,54 @@
+From 23a10a71b7fd9f87e459f4c2b7b422f931287a3e Mon Sep 17 00:00:00 2001
+From: Mubashir Adnan Qureshi <mubashirq@google.com>
+Date: Wed, 26 Oct 2022 13:51:15 +0000
+Subject: [PATCH 22/29] tcp: add rcv_wnd and plb_rehash to TCP_INFO
+
+rcv_wnd can be useful to diagnose TCP performance where receiver window
+becomes the bottleneck. rehash reports the PLB and timeout triggered
+rehash attempts by the TCP connection.
+
+Signed-off-by: Mubashir Adnan Qureshi <mubashirq@google.com>
+Signed-off-by: Yuchung Cheng <ycheng@google.com>
+Signed-off-by: Neal Cardwell <ncardwell@google.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Tashfin Shakeer Rhythm <tashfinshakeerrhythm@gmail.com>
+(cherry picked from commit 2345bfd54603e92a0fed07b6a17440bfb0e8f97f)
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ include/uapi/linux/tcp.h | 5 +++++
+ net/ipv4/tcp.c           | 2 ++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/include/uapi/linux/tcp.h b/include/uapi/linux/tcp.h
+index 37ebd36432d9..d4fe8a094a5c 100644
+--- a/include/uapi/linux/tcp.h
++++ b/include/uapi/linux/tcp.h
+@@ -284,6 +284,11 @@ struct tcp_info {
+ 	__u32	tcpi_snd_wnd;	     /* peer's advertised receive window after
+ 				      * scaling (bytes)
+ 				      */
++	__u32	tcpi_rcv_wnd;	     /* local advertised receive window after
++				      * scaling (bytes)
++				      */
++
++	__u32   tcpi_rehash;         /* PLB or timeout triggered rehash attempts */
+ };
+ 
+ /* netlink attributes types for SCM_TIMESTAMPING_OPT_STATS */
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index faac20675282..ef45eab1315a 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -3394,6 +3394,8 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
+ 	info->tcpi_reord_seen = tp->reord_seen;
+ 	info->tcpi_rcv_ooopack = tp->rcv_ooopack;
+ 	info->tcpi_snd_wnd = tp->snd_wnd;
++	info->tcpi_rcv_wnd = tp->rcv_wnd;
++	info->tcpi_rehash = tp->plb_rehash + tp->timeout_rehash;
+ 	info->tcpi_fastopen_client_fail = tp->fastopen_client_fail;
+ 	unlock_sock_fast(sk, slow);
+ }
+-- 
+2.51.0
+

@@ -1,0 +1,28 @@
+From 2ff5db7ec01af57ab5885ab0588af26eea77b80a Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Wed, 24 Dec 2025 22:36:49 +0000
+Subject: [PATCH 29/29] net: ipv4: bpf_tcp_ca: adapt to new kernel structure
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ net/ipv4/bpf_tcp_ca.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/ipv4/bpf_tcp_ca.c b/net/ipv4/bpf_tcp_ca.c
+index 618954f82764..3ee651796428 100644
+--- a/net/ipv4/bpf_tcp_ca.c
++++ b/net/ipv4/bpf_tcp_ca.c
+@@ -16,9 +16,9 @@ static u32 optional_ops[] = {
+ 	offsetof(struct tcp_congestion_ops, cwnd_event),
+ 	offsetof(struct tcp_congestion_ops, in_ack_event),
+ 	offsetof(struct tcp_congestion_ops, pkts_acked),
+-	offsetof(struct tcp_congestion_ops, min_tso_segs),
+ 	offsetof(struct tcp_congestion_ops, sndbuf_expand),
+ 	offsetof(struct tcp_congestion_ops, cong_control),
++	offsetof(struct netns_ipv4, sysctl_tcp_min_tso_segs),
+ };
+ 
+ static u32 unsupported_ops[] = {
+-- 
+2.51.0
+

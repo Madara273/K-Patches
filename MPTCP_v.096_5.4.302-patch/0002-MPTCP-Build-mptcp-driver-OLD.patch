@@ -1,0 +1,38 @@
+From 0645112a4305058480c59d7a5141bd3419c9b220 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 22 Feb 2025 19:36:57 +0000
+Subject: [PATCH 02/14] MPTCP -- Build mptcp driver (OLD)
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ net/Kconfig  | 1 +
+ net/Makefile | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/net/Kconfig b/net/Kconfig
+index 7bab19b67941..4bcbd61f74f1 100644
+--- a/net/Kconfig
++++ b/net/Kconfig
+@@ -94,6 +94,7 @@ if INET
+ source "net/ipv4/Kconfig"
+ source "net/ipv6/Kconfig"
+ source "net/netlabel/Kconfig"
++source "net/mptcp/Kconfig"
+ 
+ endif # if INET
+ 
+diff --git a/net/Makefile b/net/Makefile
+index ebe78f410688..650bc30023e1 100644
+--- a/net/Makefile
++++ b/net/Makefile
+@@ -20,6 +20,7 @@ obj-$(CONFIG_TLS)		+= tls/
+ obj-$(CONFIG_XFRM)		+= xfrm/
+ obj-$(CONFIG_UNIX_SCM)		+= unix/
+ obj-$(CONFIG_NET)		+= ipv6/
++obj-$(CONFIG_MPTCP)		+= mptcp/
+ obj-$(CONFIG_BPFILTER)		+= bpfilter/
+ obj-$(CONFIG_PACKET)		+= packet/
+ obj-$(CONFIG_NET_KEY)		+= key/
+-- 
+2.51.0
+

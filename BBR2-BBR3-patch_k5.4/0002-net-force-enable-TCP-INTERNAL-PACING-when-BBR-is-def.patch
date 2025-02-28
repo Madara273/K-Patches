@@ -1,0 +1,40 @@
+From 3d7347b47b0c4203cccf9da66302305926617597 Mon Sep 17 00:00:00 2001
+From: psndna88 <psndna88@gmail.com>
+Date: Mon, 15 Apr 2024 17:23:06 +0530
+Subject: [PATCH 02/29] net: force enable TCP INTERNAL PACING when BBR is
+ default without FQ
+
+(cherry picked from commit dc2bd6ff3ffb220751670bc02548f0cd5b406067)
+Signed-off-by: TogoFire <togofire@mailfence.com>
+Change-Id: I3265af8f5182cd5d922a4021a704138fe0950d20
+---
+ include/net/tcp.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 31518fa2a948..0fae4043d7c5 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -1306,10 +1306,19 @@ static inline bool tcp_is_cwnd_limited(const struct sock *sk)
+  * but is not always installed/used.
+  * Return true if TCP stack should pace packets itself.
+  */
++#if defined(CONFIG_DEFAULT_BBR) && !defined(CONFIG_DEFAULT_FQ)
++// FORCE ENABLE TCP INTERNAL PACING with default BBR without FQ
++static inline bool tcp_needs_internal_pacing(struct sock *sk)
++{
++	sk->sk_pacing_status = SK_PACING_NEEDED;
++	return true;
++}
++#else
+ static inline bool tcp_needs_internal_pacing(const struct sock *sk)
+ {
+ 	return smp_load_acquire(&sk->sk_pacing_status) == SK_PACING_NEEDED;
+ }
++#endif
+ 
+ /* Return in jiffies the delay before one skb is sent.
+  * If @skb is NULL, we look at EDT for next packet being sent on the socket.
+-- 
+2.51.0
+

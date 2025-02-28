@@ -1,0 +1,26 @@
+From dc1b3db1510dbadf1dd7b14a3b05bea2a570d904 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 22 Feb 2025 20:03:25 +0000
+Subject: [PATCH 05/14] MPTCP -- net: make tcp_write_err globally accessible
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ net/ipv4/tcp_timer.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/ipv4/tcp_timer.c b/net/ipv4/tcp_timer.c
+index adfc4acc3740..24ae144462b6 100644
+--- a/net/ipv4/tcp_timer.c
++++ b/net/ipv4/tcp_timer.c
+@@ -99,7 +99,7 @@ u32 tcp_clamp_probe0_to_user_timeout(const struct sock *sk, u32 when)
+  *  Returns: Nothing (void)
+  */
+ 
+-static void tcp_write_err(struct sock *sk)
++void tcp_write_err(struct sock *sk)
+ 
+ {
+ 	sk->sk_err = sk->sk_err_soft ? : ETIMEDOUT;
+-- 
+2.51.0
+

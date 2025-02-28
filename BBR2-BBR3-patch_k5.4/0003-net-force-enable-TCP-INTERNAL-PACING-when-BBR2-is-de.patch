@@ -1,0 +1,31 @@
+From 73d0986cb6034ea360d53ccdf13f92a5e862a0c2 Mon Sep 17 00:00:00 2001
+From: psndna88 <psndna88@gmail.com>
+Date: Sun, 21 Apr 2024 23:10:00 +0530
+Subject: [PATCH 03/29] net: force enable TCP INTERNAL PACING when BBR2 is
+ default without FQ
+
+vowifi does not work id default qdisc is changed from pfifo_fast
+
+(cherry picked from commit 4e061b8b2470fde6bbef5d1f703fa1ed9d659168)
+Signed-off-by: TogoFire <togofire@mailfence.com>
+Change-Id: I864cc112f0c45696e19b4d85abf98c6b3854475e
+---
+ include/net/tcp.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 0fae4043d7c5..84dad3f526c2 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -1306,7 +1306,7 @@ static inline bool tcp_is_cwnd_limited(const struct sock *sk)
+  * but is not always installed/used.
+  * Return true if TCP stack should pace packets itself.
+  */
+-#if defined(CONFIG_DEFAULT_BBR) && !defined(CONFIG_DEFAULT_FQ)
++#if (defined(CONFIG_DEFAULT_BBR) || defined(CONFIG_DEFAULT_BBR2)) && !defined(CONFIG_DEFAULT_FQ)
+ // FORCE ENABLE TCP INTERNAL PACING with default BBR without FQ
+ static inline bool tcp_needs_internal_pacing(struct sock *sk)
+ {
+-- 
+2.51.0
+
