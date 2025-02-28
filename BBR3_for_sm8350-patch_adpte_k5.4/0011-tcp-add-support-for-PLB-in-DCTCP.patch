@@ -1,0 +1,85 @@
+From d1b6c0cf12e030adaba0b85d542eca7a71d941e4 Mon Sep 17 00:00:00 2001
+From: Mubashir Adnan Qureshi <mubashirq@google.com>
+Date: Wed, 26 Oct 2022 13:51:13 +0000
+Subject: [PATCH 11/15] tcp: add support for PLB in DCTCP
+
+PLB support is added to TCP DCTCP code. As DCTCP uses ECN as the
+congestion signal, PLB also uses ECN to make decisions whether to change
+the path or not upon sustained congestion.
+
+Signed-off-by: Mubashir Adnan Qureshi <mubashirq@google.com>
+Signed-off-by: Yuchung Cheng <ycheng@google.com>
+Signed-off-by: Neal Cardwell <ncardwell@google.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ net/ipv4/tcp_dctcp.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/net/ipv4/tcp_dctcp.c b/net/ipv4/tcp_dctcp.c
+index be2c97e907ae2..3bde2a20be5b9 100644
+--- a/net/ipv4/tcp_dctcp.c
++++ b/net/ipv4/tcp_dctcp.c
+@@ -52,6 +52,7 @@ struct dctcp {
+ 	u32 next_seq;
+ 	u32 ce_state;
+ 	u32 loss_cwnd;
++	struct tcp_plb_state plb;
+ };
+ 
+ static unsigned int dctcp_shift_g __read_mostly = 4; /* g = 1/2^4 */
+@@ -100,6 +101,8 @@ static void dctcp_init(struct sock *sk)
+ 		ca->ce_state = 0;
+ 
+ 		dctcp_reset(tp, ca);
++		tcp_plb_init(sk, &ca->plb);
++
+ 		return;
+ 	}
+ 
+@@ -126,14 +129,28 @@ static void dctcp_update_alpha(struct sock *sk, u32 flags)
+ 
+ 	/* Expired RTT */
+ 	if (!before(tp->snd_una, ca->next_seq)) {
++		u32 delivered = tp->delivered - ca->old_delivered;
+ 		u32 delivered_ce = tp->delivered_ce - ca->old_delivered_ce;
+ 		u32 alpha = ca->dctcp_alpha;
++		u32 ce_ratio = 0;
++
++		if (delivered > 0) {
++			/* dctcp_alpha keeps EWMA of fraction of ECN marked
++			 * packets. Because of EWMA smoothing, PLB reaction can
++			 * be slow so we use ce_ratio which is an instantaneous
++			 * measure of congestion. ce_ratio is the fraction of
++			 * ECN marked packets in the previous RTT.
++			 */
++			if (delivered_ce > 0)
++				ce_ratio = (delivered_ce << TCP_PLB_SCALE) / delivered;
++			tcp_plb_update_state(sk, &ca->plb, (int)ce_ratio);
++			tcp_plb_check_rehash(sk, &ca->plb);
++		}
+ 
+ 		/* alpha = (1 - g) * alpha + g * F */
+ 
+ 		alpha -= min_not_zero(alpha, alpha >> dctcp_shift_g);
+ 		if (delivered_ce) {
+-			u32 delivered = tp->delivered - ca->old_delivered;
+ 
+ 			/* If dctcp_shift_g == 1, a 32bit value would overflow
+ 			 * after 8 M packets.
+@@ -181,8 +198,12 @@ static void dctcp_cwnd_event(struct sock *sk, enum tcp_ca_event ev)
+ 		dctcp_ece_ack_update(sk, ev, &ca->prior_rcv_nxt, &ca->ce_state);
+ 		break;
+ 	case CA_EVENT_LOSS:
++		tcp_plb_update_state_upon_rto(sk, &ca->plb);
+ 		dctcp_react_to_loss(sk);
+ 		break;
++	case CA_EVENT_TX_START:
++		tcp_plb_check_rehash(sk, &ca->plb); /* Maybe rehash when inflight is 0 */
++		break;
+ 	default:
+ 		/* Don't care for the rest. */
+ 		break;
+-- 
+2.47.2
+

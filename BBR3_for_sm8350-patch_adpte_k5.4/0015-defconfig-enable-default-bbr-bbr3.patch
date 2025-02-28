@@ -1,0 +1,28 @@
+From b42f372869bd66a633a09807eb6ed7d6d41231d6 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Fri, 28 Feb 2025 09:44:36 +0000
+Subject: [PATCH 15/15] defconfig: enable default bbr --- bbr3
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ arch/arm64/configs/neutrino_defconfig | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/configs/neutrino_defconfig b/arch/arm64/configs/neutrino_defconfig
+index bd61ea0656381..0b6911a36d8a9 100755
+--- a/arch/arm64/configs/neutrino_defconfig
++++ b/arch/arm64/configs/neutrino_defconfig
+@@ -188,8 +188,8 @@ CONFIG_TCP_CONG_BBRPLUS=y
+ CONFIG_TCP_CONG_BBR=y
+ # CONFIG_DEFAULT_CUBIC is not set
+ # CONFIG_DEFAULT_WESTWOOD is not set
+-CONFIG_DEFAULT_BBR2=y
+-CONFIG_DEFAULT_TCP_CONG="bbr2"
++CONFIG_DEFAULT_BBR=y
++CONFIG_DEFAULT_TCP_CONG="bbr"
+ CONFIG_IPV6_ROUTER_PREF=y
+ CONFIG_IPV6_ROUTE_INFO=y
+ CONFIG_IPV6_OPTIMISTIC_DAD=y
+-- 
+2.47.2
+

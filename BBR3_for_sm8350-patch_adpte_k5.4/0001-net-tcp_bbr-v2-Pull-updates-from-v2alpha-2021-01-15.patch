@@ -1,0 +1,35 @@
+From 211d1aaaa1fd3acbfbc39b90c7a681ba1cdd126c Mon Sep 17 00:00:00 2001
+From: Sultan Alsawaf <sultan@kerneltoast.com>
+Date: Mon, 24 Jun 2019 22:22:55 +0800
+Subject: [PATCH 01/15] net-tcp_bbr: v2: Pull updates from v2alpha-2021-01-15
+ Source: https://github.com/google/bbr/releases/tag/v2alpha-2021-01-15
+
+---
+ net/ipv4/tcp_bbr2.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/net/ipv4/tcp_bbr2.c b/net/ipv4/tcp_bbr2.c
+index eafeb67dab62e..9e94bd2671ff7 100644
+--- a/net/ipv4/tcp_bbr2.c
++++ b/net/ipv4/tcp_bbr2.c
+@@ -2628,15 +2628,12 @@ static void bbr2_set_state(struct sock *sk, u8 new_state)
+ 			/* bbr_adapt_lower_bounds() needs cwnd before
+ 			 * we suffered an RTO, to update inflight_lo:
+ 			 */
+-			WARN_ON_ONCE(bbr->prior_cwnd == 0);
+-			WARN_ON_ONCE(bbr->prior_cwnd == ~0U);
+-			bbr->inflight_lo = bbr->prior_cwnd;
++			bbr->inflight_lo =
++				max(tp->snd_cwnd, bbr->prior_cwnd);
+ 		}
+ 		bbr_debug(sk, 0, &rs, &ctx);
+ 	} else if (bbr->prev_ca_state == TCP_CA_Loss &&
+ 		   new_state != TCP_CA_Loss) {
+-		WARN_ON_ONCE(bbr->prior_cwnd == 0);
+-		WARN_ON_ONCE(bbr->prior_cwnd == ~0U);
+ 		tp->snd_cwnd = max(tp->snd_cwnd, bbr->prior_cwnd);
+ 		bbr->try_fast_path = 0; /* bound cwnd using latest model */
+ 	}
+-- 
+2.47.2
+
