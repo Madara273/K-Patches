@@ -1,0 +1,36 @@
+From 3791babae8b65fddbc653b6aa2b58e7ddc42dd95 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Fri, 14 Mar 2025 13:02:23 +0000
+Subject: [PATCH 02/14] LRNG: Build lrng
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/char/Kconfig  | 2 ++
+ drivers/char/Makefile | 1 +
+ 2 files changed, 3 insertions(+)
+
+diff --git a/drivers/char/Kconfig b/drivers/char/Kconfig
+index f6b3bb8b66a09..e68d61c8f5f6b 100644
+--- a/drivers/char/Kconfig
++++ b/drivers/char/Kconfig
+@@ -661,6 +661,8 @@ config RANDOM_TRUST_BOOTLOADER
+ 	  believe its RNG facilities may be faulty. This may also be configured
+ 	  at boot time with "random.trust_bootloader=on/off".
+ 
++source "drivers/char/lrng/Kconfig"
++
+ endmenu
+ 
+ config OKL4_PIPE
+diff --git a/drivers/char/Makefile b/drivers/char/Makefile
+index 28c14cc2ae8e2..70f8265bb77e7 100644
+--- a/drivers/char/Makefile
++++ b/drivers/char/Makefile
+@@ -77,3 +77,4 @@ obj-$(CONFIG_VSERVICES_SERIAL_SERVER)	+= vs_serial_server.o
+ CFLAGS_vs_serial_server.o	+= -Werror
+ obj-$(CONFIG_RB5_FAN_CONTROLLER)	+= rb5_fan.o
+ obj-$(CONFIG_RB5_GPIOS_ENABLE)	+= rb5-gpios-enable.o
++obj-$(CONFIG_LRNG)		+= lrng/
+-- 
+2.47.2
+

@@ -1,0 +1,567 @@
+From de03f71fec6ff85b28c0acfac249d81ca468e9bc Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Fri, 14 Mar 2025 14:12:17 +0000
+Subject: [PATCH 14/14] LRNG: BACKPORT TO K4.19
+
+ref: https://github.com/smuellerDD/lrng/tree/master/backports/v57-4.19.322
+---
+ drivers/char/lrng/lrng_definitions.h          |   3 +-
+ drivers/char/lrng/lrng_drng_chacha20.c        |   2 +-
+ drivers/char/lrng/lrng_drng_drbg.c            |   2 +-
+ drivers/char/lrng/lrng_drng_kcapi.c           |   2 +-
+ drivers/char/lrng/lrng_es_cpu.c               |  17 +--
+ drivers/char/lrng/lrng_es_irq.c               |   1 +
+ drivers/char/lrng/lrng_es_mgr.c               |  16 +--
+ drivers/char/lrng/lrng_interface_dev.c        |   1 -
+ drivers/char/lrng/lrng_interface_dev_common.c |   3 +-
+ .../char/lrng/lrng_interface_random_kernel.c  | 129 +++++++++++++++++-
+ .../char/lrng/lrng_interface_random_kernel.h  |   4 +
+ .../char/lrng/lrng_interface_random_user.c    |   2 -
+ drivers/char/lrng/lrng_sha1.c                 |   4 +-
+ drivers/char/lrng/lrng_sha256.c               |   2 +-
+ drivers/char/lrng/lrng_sysctl.c               |  13 +-
+ drivers/char/lrng/lrng_testing.c              |   2 +-
+ include/crypto/sha.h                          |  10 ++
+ lib/Kconfig                                   |   3 +
+ lib/Makefile                                  |   3 +
+ 19 files changed, 171 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/char/lrng/lrng_definitions.h b/drivers/char/lrng/lrng_definitions.h
+index 247dd2343ca19..7f63fb59691de 100644
+--- a/drivers/char/lrng/lrng_definitions.h
++++ b/drivers/char/lrng/lrng_definitions.h
+@@ -6,8 +6,7 @@
+ #ifndef _LRNG_DEFINITIONS_H
+ #define _LRNG_DEFINITIONS_H
+ 
+-#include <crypto/sha1.h>
+-#include <crypto/sha2.h>
++#include <crypto/sha.h>
+ #include <linux/slab.h>
+ 
+ /*************************** General LRNG parameter ***************************/
+diff --git a/drivers/char/lrng/lrng_drng_chacha20.c b/drivers/char/lrng/lrng_drng_chacha20.c
+index 31be102e30079..82f1717f078dd 100644
+--- a/drivers/char/lrng/lrng_drng_chacha20.c
++++ b/drivers/char/lrng/lrng_drng_chacha20.c
+@@ -159,7 +159,7 @@ static void lrng_cc20_drng_dealloc(void *drng)
+ 	struct chacha20_state *chacha20_state = (struct chacha20_state *)drng;
+ 
+ 	pr_debug("ChaCha20 core zeroized and freed\n");
+-	kfree_sensitive(chacha20_state);
++	kzfree(chacha20_state);
+ }
+ 
+ static const char *lrng_cc20_drng_name(void)
+diff --git a/drivers/char/lrng/lrng_drng_drbg.c b/drivers/char/lrng/lrng_drng_drbg.c
+index 0da8150e0d429..ad4dba89084af 100644
+--- a/drivers/char/lrng/lrng_drng_drbg.c
++++ b/drivers/char/lrng/lrng_drng_drbg.c
+@@ -140,7 +140,7 @@ static void lrng_drbg_drng_dealloc(void* drng)
+ 	if (drbg && drbg->d_ops)
+ 		drbg->d_ops->crypto_fini(drbg);
+ 	drbg_dealloc_state(drbg);
+-	kfree_sensitive(drbg);
++	kzfree(drbg);
+ 	pr_info("DRBG deallocated\n");
+ }
+ 
+diff --git a/drivers/char/lrng/lrng_drng_kcapi.c b/drivers/char/lrng/lrng_drng_kcapi.c
+index a204bcf52a9ac..469e707a4edcc 100644
+--- a/drivers/char/lrng/lrng_drng_kcapi.c
++++ b/drivers/char/lrng/lrng_drng_kcapi.c
+@@ -38,7 +38,7 @@ static int lrng_kcapi_drng_seed_helper(void *drng, const u8 *inbuf,
+ 	struct crypto_shash *hash_tfm = lrng_drng_info->hash_tfm;
+ 	SHASH_DESC_ON_STACK(shash, hash_tfm);
+ 	u32 digestsize;
+-	u8 digest[HASH_MAX_DIGESTSIZE] __aligned(8);
++	u8 digest[64] __aligned(8);
+ 	int ret;
+ 
+ 	if (!hash_tfm)
+diff --git a/drivers/char/lrng/lrng_es_cpu.c b/drivers/char/lrng/lrng_es_cpu.c
+index 1c0c23ae89683..98273a8f31654 100644
+--- a/drivers/char/lrng/lrng_es_cpu.c
++++ b/drivers/char/lrng/lrng_es_cpu.c
+@@ -65,8 +65,7 @@ static u32 lrng_cpu_poolsize(void)
+ 
+ static u32 lrng_get_cpu_data(u8 *outbuf, u32 requested_bits)
+ {
+-	size_t longs = 0;
+-	u32 i,  req = requested_bits >> 3;
++	u32 i;
+ 
+ 	/* operate on full blocks */
+ 	BUILD_BUG_ON(LRNG_DRNG_SECURITY_STRENGTH_BYTES % sizeof(unsigned long));
+@@ -74,14 +73,10 @@ static u32 lrng_get_cpu_data(u8 *outbuf, u32 requested_bits)
+ 	/* ensure we have aligned buffers */
+ 	BUILD_BUG_ON(LRNG_KCAPI_ALIGN % sizeof(unsigned long));
+ 
+-	for (i = 0; i < req; i += longs) {
+-		longs = arch_get_random_seed_longs(
+-			(unsigned long *)(outbuf + i), req - i);
+-		if (longs)
+-			continue;
+-		longs = arch_get_random_longs((unsigned long *)(outbuf + i),
+-					      req - i);
+-		if (!longs) {
++	for (i = 0; i < (requested_bits >> 3);
++	     i += sizeof(unsigned long)) {
++		if (!arch_get_random_seed_long((unsigned long *)(outbuf + i)) &&
++		    !arch_get_random_long((unsigned long *)(outbuf + i))) {
+ 			cpu_entropy = 0;
+ 			return 0;
+ 		}
+@@ -180,7 +175,7 @@ static u32 lrng_cpu_multiplier(void)
+ 	if (data_multiplier > 0)
+ 		return data_multiplier;
+ 
+-	if (IS_ENABLED(CONFIG_X86) && !arch_get_random_seed_longs(&v, 1)) {
++	if (IS_ENABLED(CONFIG_X86) && !arch_get_random_seed_long(&v)) {
+ 		/*
+ 		 * Intel SPEC: pulling 512 blocks from RDRAND ensures
+ 		 * one reseed making it logically equivalent to RDSEED.
+diff --git a/drivers/char/lrng/lrng_es_irq.c b/drivers/char/lrng/lrng_es_irq.c
+index 08b0358444f87..d4659d8540032 100644
+--- a/drivers/char/lrng/lrng_es_irq.c
++++ b/drivers/char/lrng/lrng_es_irq.c
+@@ -13,6 +13,7 @@
+ #include <linux/gcd.h>
+ #include <linux/module.h>
+ #include <linux/random.h>
++#include <linux/ratelimit.h>
+ 
+ #include "lrng_es_aux.h"
+ #include "lrng_es_irq.h"
+diff --git a/drivers/char/lrng/lrng_es_mgr.c b/drivers/char/lrng/lrng_es_mgr.c
+index ea1ccc5363ce7..663ba15ad7123 100644
+--- a/drivers/char/lrng/lrng_es_mgr.c
++++ b/drivers/char/lrng/lrng_es_mgr.c
+@@ -308,6 +308,7 @@ static void lrng_set_operational(void)
+ 	 */
+ 	if (lrng_state.lrng_fully_seeded) {
+ 		lrng_state.lrng_operational = true;
++		lrng_process_ready_list();
+ 		lrng_init_wakeup();
+ 		pr_info("LRNG fully operational\n");
+ 	}
+@@ -410,19 +411,12 @@ void __init lrng_rand_initialize_early(void)
+ 				    sizeof(unsigned long))];
+ 		struct new_utsname utsname;
+ 	} seed __aligned(LRNG_KCAPI_ALIGN);
+-	size_t longs = 0;
+ 	unsigned int i;
+ 
+-	for (i = 0; i < ARRAY_SIZE(seed.data); i += longs) {
+-		longs = arch_get_random_seed_longs(seed.data + i,
+-						   ARRAY_SIZE(seed.data) - i);
+-		if (longs)
+-			continue;
+-		longs = arch_get_random_longs(seed.data + i,
+-					      ARRAY_SIZE(seed.data) - i);
+-		if (longs)
+-			continue;
+-		longs = 1;
++	for (i = 0; i < ARRAY_SIZE(seed.data); i++) {
++		if (!arch_get_random_seed_long_early(&(seed.data[i])) &&
++		    !arch_get_random_long_early(&seed.data[i]))
++			seed.data[i] = random_get_entropy();
+ 	}
+ 	memcpy(&seed.utsname, init_utsname(), sizeof(*(init_utsname())));
+ 
+diff --git a/drivers/char/lrng/lrng_interface_dev.c b/drivers/char/lrng/lrng_interface_dev.c
+index e60060d402b30..2265cf0dd9c59 100644
+--- a/drivers/char/lrng/lrng_interface_dev.c
++++ b/drivers/char/lrng/lrng_interface_dev.c
+@@ -15,7 +15,6 @@ static const struct file_operations lrng_fops = {
+ 	.write = lrng_drng_write,
+ 	.poll  = lrng_random_poll,
+ 	.unlocked_ioctl = lrng_ioctl,
+-	.compat_ioctl = compat_ptr_ioctl,
+ 	.fasync = lrng_fasync,
+ 	.llseek = noop_llseek,
+ };
+diff --git a/drivers/char/lrng/lrng_interface_dev_common.c b/drivers/char/lrng/lrng_interface_dev_common.c
+index 8ce0617e8d678..427f96b31448c 100644
+--- a/drivers/char/lrng/lrng_interface_dev_common.c
++++ b/drivers/char/lrng/lrng_interface_dev_common.c
+@@ -8,6 +8,7 @@
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
+ #include <linux/random.h>
++#include <linux/sched/signal.h>
+ #include <linux/slab.h>
+ 
+ #include "lrng_drng_mgr.h"
+@@ -152,7 +153,7 @@ ssize_t lrng_read_common(char __user *buf, size_t nbytes, bool pr)
+ 
+ 	/* Wipe data just returned from memory */
+ 	if (tmp_large)
+-		kfree_sensitive(tmp_large);
++		kzfree(tmp_large);
+ 	else
+ 		memzero_explicit(tmpbuf, sizeof(tmpbuf));
+ 
+diff --git a/drivers/char/lrng/lrng_interface_random_kernel.c b/drivers/char/lrng/lrng_interface_random_kernel.c
+index b7047dc253e4d..9c6bbcdbe5b60 100644
+--- a/drivers/char/lrng/lrng_interface_random_kernel.c
++++ b/drivers/char/lrng/lrng_interface_random_kernel.c
+@@ -21,6 +21,10 @@
+ 
+ static ATOMIC_NOTIFIER_HEAD(random_ready_notifier);
+ 
++static RAW_NOTIFIER_HEAD(lrng_ready_chain);
++static DEFINE_SPINLOCK(lrng_ready_chain_lock);
++static unsigned int lrng_ready_chain_used = 0;
++
+ /********************************** Helper ***********************************/
+ 
+ static bool lrng_trust_bootloader __initdata =
+@@ -32,15 +36,17 @@ static int __init lrng_parse_trust_bootloader(char *arg)
+ }
+ early_param("random.trust_bootloader", lrng_parse_trust_bootloader);
+ 
+-void __init random_init_early(const char *command_line)
++static void __init random_init_early(const char *command_line)
+ {
+ 	lrng_rand_initialize_early();
+ 	lrng_pool_insert_aux(command_line, strlen(command_line), 0);
+ }
+ 
+-void __init random_init(void)
++int __init random_init(const char *command_line)
+ {
++	random_init_early(command_line);
+ 	lrng_rand_initialize();
++	return 0;
+ }
+ 
+ /*
+@@ -70,6 +76,33 @@ void lrng_kick_random_ready(void)
+ 	atomic_notifier_call_chain(&random_ready_notifier, 0, NULL);
+ }
+ 
++bool lrng_ready_chain_has_sleeper(void)
++{
++	return !!lrng_ready_chain_used;
++}
++
++/*
++ * lrng_process_ready_list() - Ping all kernel internal callers waiting until
++ * the DRNG is completely initialized to inform that the DRNG reached that
++ * seed level.
++ *
++ * When the SP800-90B testing is enabled, the ping only happens if the SP800-90B
++ * startup health tests are completed. This implies that kernel internal
++ * callers always have an SP800-90B compliant noise source when being
++ * pinged.
++ */
++void lrng_process_ready_list(void)
++{
++	unsigned long flags;
++
++	if (!lrng_state_operational())
++		return;
++
++	spin_lock_irqsave(&lrng_ready_chain_lock, flags);
++	raw_notifier_call_chain(&lrng_ready_chain, 0, NULL);
++	spin_unlock_irqrestore(&lrng_ready_chain_lock, flags);
++}
++
+ /************************ LRNG kernel input interfaces ************************/
+ 
+ /*
+@@ -85,7 +118,7 @@ void lrng_kick_random_ready(void)
+  * @entropy_bits: amount of entropy in buffer (value is in bits)
+  */
+ void add_hwgenerator_randomness(const void *buffer, size_t count,
+-				size_t entropy_bits, bool sleep_after)
++				size_t entropy_bits)
+ {
+ 	/*
+ 	 * Suspend writing if we are fully loaded with entropy or if caller
+@@ -96,7 +129,6 @@ void add_hwgenerator_randomness(const void *buffer, size_t count,
+ 	wait_event_interruptible(lrng_write_wait,
+ 				(lrng_need_entropy() && entropy_bits) ||
+ 				lrng_state_exseed_allow(lrng_noise_source_hw) ||
+-				!sleep_after ||
+ 				kthread_should_stop());
+ 	lrng_state_exseed_set(lrng_noise_source_hw, false);
+ 	lrng_pool_insert_aux(buffer, count, entropy_bits);
+@@ -166,6 +198,58 @@ void add_interrupt_randomness(int irq) { }
+ EXPORT_SYMBOL(add_interrupt_randomness);
+ #endif
+ 
++/*
++ * unregister_random_ready_notifier() - Delete a previously registered readiness
++ * callback function.
++ *
++ * @nb: callback definition that was registered initially
++ */
++int unregister_random_ready_notifier(struct notifier_block *nb)
++{
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&lrng_ready_chain_lock, flags);
++	ret = raw_notifier_chain_unregister(&lrng_ready_chain, nb);
++	spin_unlock_irqrestore(&lrng_ready_chain_lock, flags);
++
++	if (!ret && lrng_ready_chain_used)
++		lrng_ready_chain_used--;
++
++	return ret;
++}
++EXPORT_SYMBOL(unregister_random_ready_notifier);
++
++/*
++ * register_random_ready_notifier() - Add a callback function that will be
++ * invoked when the DRNG is fully initialized and seeded.
++ *
++ * @nb: callback definition to be invoked when the LRNG is seeded
++ *
++ * Return:
++ * * 0 if callback is successfully added
++ * * -EALREADY if pool is already initialised (callback not called)
++ */
++int register_random_ready_notifier(struct notifier_block *nb)
++{
++	unsigned long flags;
++	int err = -EALREADY;
++
++	if (likely(lrng_state_operational()))
++		return err;
++
++	spin_lock_irqsave(&lrng_ready_chain_lock, flags);
++	if (!lrng_state_operational())
++		err = raw_notifier_chain_register(&lrng_ready_chain, nb);
++	spin_unlock_irqrestore(&lrng_ready_chain_lock, flags);
++
++	if (!err)
++		lrng_ready_chain_used++;
++
++	return err;
++}
++EXPORT_SYMBOL(register_random_ready_notifier);
++
+ #if IS_ENABLED(CONFIG_VMGENID)
+ static BLOCKING_NOTIFIER_HEAD(lrng_vmfork_chain);
+ 
+@@ -235,6 +319,43 @@ int wait_for_random_bytes(void)
+ }
+ EXPORT_SYMBOL(wait_for_random_bytes);
+ 
++/*
++ * get_random_bytes_arch() - This function will use the architecture-specific
++ * hardware random number generator if it is available.
++ *
++ * The arch-specific hw RNG will almost certainly be faster than what we can
++ * do in software, but it is impossible to verify that it is implemented
++ * securely (as opposed, to, say, the AES encryption of a sequence number using
++ * a key known by the NSA).  So it's useful if we need the speed, but only if
++ * we're willing to trust the hardware manufacturer not to have put in a back
++ * door.
++ *
++ * @buf: buffer allocated by caller to store the random data in
++ * @nbytes: length of outbuf
++ *
++ * Return: number of bytes filled in.
++ */
++size_t __must_check get_random_bytes_arch(void *buf, size_t nbytes)
++{
++	size_t left = nbytes;
++	u8 *p = buf;
++
++	while (left) {
++		unsigned long v;
++		size_t chunk = min_t(size_t, left, sizeof(unsigned long));
++
++		if (!arch_get_random_long(&v))
++			break;
++
++		memcpy(p, &v, chunk);
++		p += chunk;
++		left -= chunk;
++	}
++
++	return nbytes - left;
++}
++EXPORT_SYMBOL(get_random_bytes_arch);
++
+ /*
+  * Returns whether or not the LRNG has been seeded.
+  *
+diff --git a/drivers/char/lrng/lrng_interface_random_kernel.h b/drivers/char/lrng/lrng_interface_random_kernel.h
+index ea2b5be8d7f3c..b875e0bf258e5 100644
+--- a/drivers/char/lrng/lrng_interface_random_kernel.h
++++ b/drivers/char/lrng/lrng_interface_random_kernel.h
+@@ -7,9 +7,13 @@
+ #define _LRNG_INTERFACE_RANDOM_H
+ 
+ #ifdef CONFIG_LRNG_RANDOM_IF
++void lrng_process_ready_list(void);
++bool lrng_ready_chain_has_sleeper(void);
+ void invalidate_batched_entropy(void);
+ void lrng_kick_random_ready(void);
+ #else /* CONFIG_LRNG_RANDOM_IF */
++static inline bool lrng_ready_chain_has_sleeper(void) { return false; }
++static inline void lrng_process_ready_list(void) { }
+ static inline void invalidate_batched_entropy(void) { }
+ static inline void lrng_kick_random_ready(void) { }
+ #endif /* CONFIG_LRNG_RANDOM_IF */
+diff --git a/drivers/char/lrng/lrng_interface_random_user.c b/drivers/char/lrng/lrng_interface_random_user.c
+index d12e883804d95..2671c77a1572a 100644
+--- a/drivers/char/lrng/lrng_interface_random_user.c
++++ b/drivers/char/lrng/lrng_interface_random_user.c
+@@ -32,7 +32,6 @@ const struct file_operations random_fops = {
+ 	.write = lrng_drng_write,
+ 	.poll  = lrng_random_poll,
+ 	.unlocked_ioctl = lrng_ioctl,
+-	.compat_ioctl = compat_ptr_ioctl,
+ 	.fasync = lrng_fasync,
+ 	.llseek = noop_llseek,
+ };
+@@ -41,7 +40,6 @@ const struct file_operations urandom_fops = {
+ 	.read  = lrng_drng_read,
+ 	.write = lrng_drng_write,
+ 	.unlocked_ioctl = lrng_ioctl,
+-	.compat_ioctl = compat_ptr_ioctl,
+ 	.fasync = lrng_fasync,
+ 	.llseek = noop_llseek,
+ };
+diff --git a/drivers/char/lrng/lrng_sha1.c b/drivers/char/lrng/lrng_sha1.c
+index 9cbc7a6fee49a..0e4909b0e64a4 100644
+--- a/drivers/char/lrng/lrng_sha1.c
++++ b/drivers/char/lrng/lrng_sha1.c
+@@ -10,7 +10,7 @@
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
+ #include <linux/lrng.h>
+-#include <crypto/sha1.h>
++#include <crypto/sha.h>
+ #include <crypto/sha1_base.h>
+ 
+ #include "lrng_sha.h"
+@@ -30,7 +30,7 @@ static void lrng_sha1_block_fn(struct sha1_state *sctx, const u8 *src,
+ 	u32 temp[SHA1_WORKSPACE_WORDS];
+ 
+ 	while (blocks--) {
+-		sha1_transform(sctx->state, src, temp);
++		sha_transform(sctx->state, src, temp);
+ 		src += SHA1_BLOCK_SIZE;
+ 	}
+ 	memzero_explicit(temp, sizeof(temp));
+diff --git a/drivers/char/lrng/lrng_sha256.c b/drivers/char/lrng/lrng_sha256.c
+index 50705351a71cc..6a694b1ccf0d3 100644
+--- a/drivers/char/lrng/lrng_sha256.c
++++ b/drivers/char/lrng/lrng_sha256.c
+@@ -10,7 +10,7 @@
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
+ #include <linux/lrng.h>
+-#include <crypto/sha2.h>
++#include <linux/sha256.h>
+ 
+ #include "lrng_sha.h"
+ 
+diff --git a/drivers/char/lrng/lrng_sysctl.c b/drivers/char/lrng/lrng_sysctl.c
+index 8da1c8a7e84d3..44b688cf03bdf 100644
+--- a/drivers/char/lrng/lrng_sysctl.c
++++ b/drivers/char/lrng/lrng_sysctl.c
+@@ -23,7 +23,7 @@
+  * returned as an ASCII string in the standard UUID format; if via the
+  * sysctl system call, as 16 bytes of binary data.
+  */
+-static int lrng_sysctl_do_uuid(const struct ctl_table *table, int write,
++static int lrng_sysctl_do_uuid(struct ctl_table *table, int write,
+ 			       void *buffer, size_t *lenp, loff_t *ppos)
+ {
+ 	struct ctl_table fake_table;
+@@ -62,7 +62,7 @@ static int lrng_sysctl_do_entropy(const struct ctl_table *table, int write,
+ 	return proc_dointvec(&fake_table, write, buffer, lenp, ppos);
+ }
+ 
+-static int lrng_sysctl_do_poolsize(const struct ctl_table *table, int write,
++static int lrng_sysctl_do_poolsize(struct ctl_table *table, int write,
+ 				   void *buffer, size_t *lenp, loff_t *ppos)
+ {
+ 	struct ctl_table fake_table;
+@@ -86,7 +86,7 @@ void lrng_sysctl_update_max_write_thresh(u32 new_digestsize)
+ 	mb();
+ }
+ 
+-static struct ctl_table random_table[] = {
++struct ctl_table random_table[] = {
+ 	{
+ 		.procname	= "poolsize",
+ 		.maxlen		= sizeof(int),
+@@ -129,11 +129,6 @@ static struct ctl_table random_table[] = {
+ 		.proc_handler   = proc_dointvec,
+ 		.extra1		= &lrng_drng_reseed_max_min,
+ 	},
++	{ }
+ };
+ 
+-static int __init random_sysctls_init(void)
+-{
+-	register_sysctl_init("kernel/random", random_table);
+-	return 0;
+-}
+-device_initcall(random_sysctls_init);
+diff --git a/drivers/char/lrng/lrng_testing.c b/drivers/char/lrng/lrng_testing.c
+index 101140085d818..a79102602a34d 100644
+--- a/drivers/char/lrng/lrng_testing.c
++++ b/drivers/char/lrng/lrng_testing.c
+@@ -259,7 +259,7 @@ static int lrng_testing_extract_user(struct file *file, char __user *buf,
+ 		ret += i;
+ 	}
+ 
+-	kfree_sensitive(tmp);
++	kzfree(tmp);
+ 
+ 	if (ret > 0)
+ 		*ppos += ret;
+diff --git a/include/crypto/sha.h b/include/crypto/sha.h
+index 8a46202b18570..40cc146cdaec4 100644
+--- a/include/crypto/sha.h
++++ b/include/crypto/sha.h
+@@ -112,4 +112,14 @@ extern int crypto_sha512_update(struct shash_desc *desc, const u8 *data,
+ 
+ extern int crypto_sha512_finup(struct shash_desc *desc, const u8 *data,
+ 			       unsigned int len, u8 *hash);
++
++/*
++ * An implementation of SHA-1's compression function.  Don't use in new code!
++ * You shouldn't be using SHA-1, and even if you *have* to use SHA-1, this isn't
++ * the correct way to hash something with SHA-1 (use crypto_shash instead).
++ */
++#define SHA1_DIGEST_WORDS	(SHA1_DIGEST_SIZE / 4)
++#define SHA1_WORKSPACE_WORDS	16
++void sha_init(__u32 *buf);
++void sha_transform(__u32 *digest, const char *data, __u32 *W);
+ #endif
+diff --git a/lib/Kconfig b/lib/Kconfig
+index 2a3cec9c6b277..f12dba94b423d 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -640,3 +640,6 @@ config GENERIC_LIB_CMPDI2
+ 
+ config GENERIC_LIB_UCMPDI2
+ 	bool
++
++config CRYPTO_LIB_SHA256
++	tristate
+diff --git a/lib/Makefile b/lib/Makefile
+index fb81b1a8ddfcc..ec4130d56df8f 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -292,3 +292,6 @@ obj-$(CONFIG_GENERIC_LIB_LSHRDI3) += lshrdi3.o
+ obj-$(CONFIG_GENERIC_LIB_MULDI3) += muldi3.o
+ obj-$(CONFIG_GENERIC_LIB_CMPDI2) += cmpdi2.o
+ obj-$(CONFIG_GENERIC_LIB_UCMPDI2) += ucmpdi2.o
++
++obj-$(CONFIG_CRYPTO_LIB_SHA256) += libsha256.o
++libsha256-y := sha256.o
+-- 
+2.47.2
+

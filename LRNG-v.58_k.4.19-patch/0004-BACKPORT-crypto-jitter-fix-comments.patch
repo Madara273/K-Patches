@@ -1,0 +1,44 @@
+From 3767f425f81198b110224f41ff846d4e795832f5 Mon Sep 17 00:00:00 2001
+From: "Alexander E. Patrakov" <patrakov@gmail.com>
+Date: Wed, 18 Sep 2019 12:28:49 +0500
+Subject: [PATCH 04/14] BACKPORT: crypto: jitter - fix comments
+
+One should not say "ec can be NULL" and then dereference it.
+One cannot talk about the return value if the function returns void.
+
+Signed-off-by: Alexander E. Patrakov <patrakov@gmail.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: UtsavBalar1231 <utsavbalar1231@gmail.com>
+Change-Id: I3a9711316ea302841030e1778075bf151cf54091
+Signed-off-by: RayapKun <rayapkun@gmail.com>
+---
+ crypto/jitterentropy.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 77fa2120fe0c7..9597f9f5723d3 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -172,7 +172,7 @@ static __u64 jent_loop_shuffle(struct rand_data *ec,
+  * implies that careful retesting must be done.
+  *
+  * Input:
+- * @ec entropy collector struct -- may be NULL
++ * @ec entropy collector struct
+  * @time time stamp to be injected
+  * @loop_cnt if a value not equal to 0 is set, use the given value as number of
+  *	     loops to perform the folding
+@@ -400,8 +400,8 @@ static void jent_gen_entropy(struct rand_data *ec)
+  * primes the test if needed.
+  *
+  * Return:
+- * 0 if FIPS test passed
+- * < 0 if FIPS test failed
++ * returns normally if FIPS test passed
++ * panics the kernel if FIPS test failed
+  */
+ static void jent_fips_test(struct rand_data *ec)
+ {
+-- 
+2.47.2
+

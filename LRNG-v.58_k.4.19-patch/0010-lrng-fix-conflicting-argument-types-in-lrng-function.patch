@@ -1,0 +1,40 @@
+From bf471ab3e7a9e4ba384a537341d931dd4d1732bb Mon Sep 17 00:00:00 2001
+From: TogoFire <togofire@mailfence.com>
+Date: Tue, 13 Aug 2024 22:02:30 -0300
+Subject: [PATCH 10/14] lrng: fix conflicting argument types in lrng functions
+
+Change-Id: b1ec08531d82ca372123ecc03776705810a9bf34
+Signed-off-by: TogoFire <togofire@mailfence.com>
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/char/lrng/lrng_interface_random_kernel.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/char/lrng/lrng_interface_random_kernel.c b/drivers/char/lrng/lrng_interface_random_kernel.c
+index fabf2109ceaf3..b7047dc253e4d 100644
+--- a/drivers/char/lrng/lrng_interface_random_kernel.c
++++ b/drivers/char/lrng/lrng_interface_random_kernel.c
+@@ -149,9 +149,9 @@ EXPORT_SYMBOL_GPL(add_input_randomness);
+  *	 insert into entropy pool.
+  * @size: length of buffer
+  */
+-void add_device_randomness(const void *buf, size_t size)
++void add_device_randomness(const void *buf, unsigned int len)
+ {
+-	lrng_pool_insert_aux((u8 *)buf, size, 0);
++	lrng_pool_insert_aux((u8 *)buf, (u64)len, 0);
+ }
+ EXPORT_SYMBOL(add_device_randomness);
+ 
+@@ -210,7 +210,7 @@ EXPORT_SYMBOL_GPL(unregister_random_vmfork_notifier);
+  * @buf: buffer to store the random bytes
+  * @nbytes: size of the buffer
+  */
+-void get_random_bytes(void *buf, size_t nbytes)
++void get_random_bytes(void *buf, int nbytes)
+ {
+ 	lrng_get_random_bytes(buf, nbytes);
+ }
+-- 
+2.47.2
+
