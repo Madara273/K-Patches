@@ -1,0 +1,30 @@
+From 66843710baabedb3d6a5b2c6b8490fbc4e51d518 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sun, 15 Sep 2024 16:02:11 -0700
+Subject: [PATCH 13/14] LRMG - add drop-in replacement random API
+
+ref: https://github.com/smuellerDD/lrng
+ref: https://www.chronox.de/lrng/
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/char/Makefile | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/char/Makefile b/drivers/char/Makefile
+index 70f8265bb77e7..98823cb6b4c79 100644
+--- a/drivers/char/Makefile
++++ b/drivers/char/Makefile
+@@ -3,7 +3,8 @@
+ # Makefile for the kernel character device drivers.
+ #
+ 
+-obj-y				+= mem.o random.o
++obj-y				+= mem.o
++obj-$(CONFIG_RANDOM_DEFAULT_IMPL) += random.o
+ obj-$(CONFIG_TTY_PRINTK)	+= ttyprintk.o
+ obj-y				+= misc.o
+ obj-$(CONFIG_ATARI_DSP56K)	+= dsp56k.o
+-- 
+2.47.2
+

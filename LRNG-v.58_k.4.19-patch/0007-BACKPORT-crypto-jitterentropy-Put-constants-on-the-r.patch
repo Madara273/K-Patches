@@ -1,0 +1,66 @@
+From 772c608a94b0e6239364918abecbd0aff47b1f3d Mon Sep 17 00:00:00 2001
+From: Milan Djurovic <mdjurovic@zohomail.com>
+Date: Tue, 16 Mar 2021 18:44:03 -0700
+Subject: [PATCH 07/14] BACKPORT: crypto: jitterentropy - Put constants on the
+ right side of the expression
+
+This patch fixes the following checkpatch.pl warnings:
+
+crypto/jitterentropy.c:600: WARNING: Comparisons should place the constant on the right side of the test
+crypto/jitterentropy.c:681: WARNING: Comparisons should place the constant on the right side of the test
+crypto/jitterentropy.c:772: WARNING: Comparisons should place the constant on the right side of the test
+crypto/jitterentropy.c:829: WARNING: Comparisons should place the constant on the right side of the test
+
+Signed-off-by: Milan Djurovic <mdjurovic@zohomail.com>
+Reviewed-by: Stephan Mueller <smueller@chronox.de>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: UtsavBalar1231 <utsavbalar1231@gmail.com>
+Change-Id: I578dd89c0b40a34ca6f81d784370a0795dcd1d4f
+Signed-off-by: RayapKun <rayapkun@gmail.com>
+---
+ crypto/jitterentropy.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 57f4a1ac738bc..7204f097f4d6b 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -597,7 +597,7 @@ int jent_read_entropy(struct rand_data *ec, unsigned char *data,
+ 	if (!ec)
+ 		return -1;
+ 
+-	while (0 < len) {
++	while (len > 0) {
+ 		unsigned int tocopy;
+ 
+ 		jent_gen_entropy(ec);
+@@ -678,7 +678,7 @@ struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
+ 	}
+ 
+ 	/* verify and set the oversampling rate */
+-	if (0 == osr)
++	if (osr == 0)
+ 		osr = 1; /* minimum sampling rate is 1 */
+ 	entropy_collector->osr = osr;
+ 
+@@ -769,7 +769,7 @@ int jent_entropy_init(void)
+ 		 * etc. with the goal to clear it to get the worst case
+ 		 * measurements.
+ 		 */
+-		if (CLEARCACHE > i)
++		if (i < CLEARCACHE)
+ 			continue;
+ 
+ 		if (stuck)
+@@ -826,7 +826,7 @@ int jent_entropy_init(void)
+ 	 * should not fail. The value of 3 should cover the NTP case being
+ 	 * performed during our test run.
+ 	 */
+-	if (3 < time_backwards)
++	if (time_backwards > 3)
+ 		return JENT_ENOMONOTONIC;
+ 
+ 	/*
+-- 
+2.47.2
+
