@@ -1,0 +1,26 @@
+From 9bedc0afe0b2541e95671f4ff82b5b8d26406fdd Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 15 Mar 2025 13:51:48 +0000
+Subject: [PATCH 3/3] init: SCHED_BORE default n
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ init/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/init/Kconfig b/init/Kconfig
+index cff275bf5ef2b..23c4321030b8e 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1288,7 +1288,7 @@ config SCHED_CASS
+ 
+ config SCHED_BORE
+ 	bool "Burst-Oriented Response Enhancer"
+-	default y
++	default n
+ 	help
+ 	  In Desktop and Mobile computing, one might prefer interactive
+ 	  tasks to keep responsive no matter what they run in the background.
+-- 
+2.47.2
+

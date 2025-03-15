@@ -1,0 +1,28 @@
+From d3195f401a8ce7a436fa377e9d0d9a808618451a Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sat, 15 Mar 2025 10:35:33 +0000
+Subject: [PATCH 2/3] sched: fire: "assign task_sleep with mask DEQUEUE_SLEEP
+ to detect sleep process"
+
+(Correct assignment of task_sleep with mask DEQUEUE_SLEEP to detect sleep process)
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ kernel/sched/fair.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index a89fd1329c2e0..aa1496c2384e7 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -5659,6 +5659,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+ 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
+ 
+ #ifdef CONFIG_SCHED_BORE
++	int task_sleep = flags & DEQUEUE_SLEEP;
+ 	if (task_sleep) {
+ 		cfs_rq = cfs_rq_of(se);
+ 		if (cfs_rq->curr == se)
+-- 
+2.47.2
+
