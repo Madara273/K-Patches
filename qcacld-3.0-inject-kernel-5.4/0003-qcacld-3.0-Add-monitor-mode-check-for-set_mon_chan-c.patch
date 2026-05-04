@@ -1,0 +1,32 @@
+From ac720a62bc38bdb7d9fbcbe2ac990e127d537aeb Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Fri, 13 Mar 2026 07:52:05 +0000
+Subject: [PATCH 03/15] qcacld-3.0: Add monitor mode check for set_mon_chan
+ command
+
+ref: https://github.com/arter97-mirror/caf_qcacld-3.0
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index d60dffc23059..faa06ff7d25e 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -8487,6 +8487,11 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
+ 		return -EINVAL;
+ 	}
+ 
++	if (adapter->device_mode != QDF_MONITOR_MODE) {
++		hdd_err_rl("Not supported, adapter is not in monitor mode");
++		return -EINVAL;
++	}
++
+ 	/* Verify the BW before accepting this request */
+ 	ch_width = bandwidth;
+ 
+-- 
+2.51.0
+

@@ -1,0 +1,2065 @@
+From 0de8a4fac1cfbdb7211da9306e864856892cff20 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Wed, 18 Mar 2026 12:11:29 +0000
+Subject: [PATCH 15/15] Backport: qcacld: updating patches from kernel 5.15.
+
+https://github.com/kimocoder
+---
+ .../core/hdd/inc/wlan_hdd_frame_inject.h      |   5 +-
+ .../core/hdd/src/wlan_hdd_cfg80211.c          |  18 +
+ .../core/hdd/src/wlan_hdd_frame_inject.c      | 201 ++++--
+ ...wlan_hdd_frame_inject_comprehensive_test.c |   6 +-
+ .../hdd/src/wlan_hdd_frame_inject_debug.c     |   4 +-
+ .../src/wlan_hdd_frame_inject_security_test.c |   8 +-
+ .../core/hdd/src/wlan_hdd_frame_inject_test.c |   6 +-
+ .../core/hdd/src/wlan_hdd_frame_validate.c    |  31 +-
+ .../core/hdd/src/wlan_hdd_inject_security.c   |  29 +-
+ .../qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c  |  33 +-
+ .../qcacld-3.0/core/hdd/src/wlan_hdd_main.c   |  15 +-
+ .../qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c  | 579 +++++++++++++++++-
+ .../core/wma/inc/wma_frame_inject.h           |  25 +
+ .../core/wma/src/wma_frame_inject.c           | 329 +++++++++-
+ 14 files changed, 1169 insertions(+), 120 deletions(-)
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_frame_inject.h
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject.c
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_validate.c
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_inject_security.c
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/wma/inc/wma_frame_inject.h
+ mode change 100644 => 100755 drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c
+
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_frame_inject.h b/drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_frame_inject.h
+old mode 100644
+new mode 100755
+index a69dc1bf5bca..9cc3400793de
+--- a/drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_frame_inject.h
++++ b/drivers/staging/qcacld-3.0/core/hdd/inc/wlan_hdd_frame_inject.h
+@@ -238,6 +238,9 @@ struct injection_stats {
+ 	uint32_t cpu_usage_percent;
+ 	uint64_t queue_depth_samples;
+ 	uint32_t max_queue_depth;
++	/* Per-adapter throughput tracking (not file-static) */
++	uint64_t throughput_window_start;
++	uint64_t throughput_frames_in_window;
+ };
+ 
+ /**
+@@ -377,7 +380,7 @@ struct hdd_injection_ctx {
+ struct hdd_frame_inject_ioctl {
+ 	uint32_t cmd;
+ 	uint32_t frame_len;
+-	uint8_t *frame_data;
++	uint8_t __user *frame_data;
+ 	uint32_t tx_flags;
+ 	uint8_t retry_count;
+ 	uint32_t tx_rate;
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+index 702bb3c28c7f..ce502862acf8 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -159,6 +159,7 @@
+ #include "wlan_hdd_cfr.h"
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ #include "wlan_hdd_frame_inject.h"
++#include "wma_frame_inject.h"
+ #endif
+ #include <qdf_hang_event_notifier.h>
+ #include "wlan_hdd_ioctl.h"
+@@ -25188,6 +25189,23 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
+ 	adapter->mon_chan_freq = chandef->chan->center_freq;
+ 	adapter->mon_bandwidth = ch_width;
+ 
++#ifdef FEATURE_FRAME_INJECTION_SUPPORT
++	/*
++	 * Proactively re-tune the injection helper STA vdev to the new
++	 * monitor channel.  Without this, injected frames would briefly
++	 * go out on the old frequency until the next injection attempt
++	 * detects the mismatch and triggers a lazy re-tune.
++	 */
++	{
++		tp_wma_handle wma = cds_get_context(QDF_MODULE_ID_WMA);
++
++		if (wma)
++			wma_injection_notify_channel_change(
++				wma, adapter->vdev_id,
++				chandef->chan->center_freq);
++	}
++#endif
++
+ 	hdd_exit();
+ 
+ 	return 0;
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject.c
+old mode 100644
+new mode 100755
+index 06892d4f09c2..4dea7319b2d6
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject.c
+@@ -35,6 +35,10 @@
+ #include <qdf_trace.h>
+ #include <qdf_nbuf.h>
+ #include "wlan_hdd_cfg80211.h"
++#include "cdp_txrx_cmn.h"
++#include "cdp_txrx_flow_ctrl_legacy.h"
++#include "cdp_txrx_misc.h"
++#include "ol_txrx.h"
+ 
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ 
+@@ -137,7 +141,7 @@ QDF_STATUS hdd_init_frame_injection(struct hdd_adapter *adapter)
+ 	/* Initialize recovery work and timer */
+ 	qdf_create_work(0, &injection_ctx->recovery_ctx.recovery_work,
+ 			hdd_injection_recovery_work, adapter);
+-	
++
+ 	status = qdf_timer_init(NULL, &injection_ctx->recovery_ctx.recovery_timer,
+ 				hdd_injection_recovery_timer, adapter, QDF_TIMER_TYPE_SW);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+@@ -207,23 +211,23 @@ QDF_STATUS hdd_deinit_frame_injection(struct hdd_adapter *adapter)
+ 
+ 	/* Clean up injection queue */
+ 	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+-	
++
+ 	status = qdf_list_peek_front(&injection_ctx->injection_queue, &node);
+ 	while (QDF_IS_STATUS_SUCCESS(status)) {
+ 		req = qdf_container_of(node, struct inject_frame_req, node);
+-		
++
+ 		status = qdf_list_peek_next(&injection_ctx->injection_queue, node, &next_node);
+-		
++
+ 		qdf_list_remove_node(&injection_ctx->injection_queue, node);
+-		
++
+ 		/* Free frame data */
+ 		if (req->frame_data)
+ 			qdf_mem_free(req->frame_data);
+ 		qdf_mem_free(req);
+-		
++
+ 		node = next_node;
+ 	}
+-	
++
+ 	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+ 
+ 	/* Cleanup security context */
+@@ -323,6 +327,18 @@ static QDF_STATUS hdd_create_injection_request(struct hdd_frame_inject_ioctl *io
+ 		return QDF_STATUS_E_INVAL;
+ 	}
+ 
++	/* Validate userspace frame_data pointer before accessing it */
++	if (!ioctl_data->frame_data) {
++		hdd_inject_err("NULL frame_data pointer from userspace");
++		return QDF_STATUS_E_INVAL;
++	}
++
++	if (!access_ok(ioctl_data->frame_data, ioctl_data->frame_len)) {
++		hdd_inject_err("Invalid userspace frame_data pointer %pK len %u",
++			       ioctl_data->frame_data, ioctl_data->frame_len);
++		return QDF_STATUS_E_FAULT;
++	}
++
+ 	/* Allocate injection request */
+ 	injection_req = qdf_mem_malloc(sizeof(*injection_req));
+ 	if (!injection_req) {
+@@ -434,29 +450,48 @@ QDF_STATUS hdd_process_frame_injection(struct hdd_adapter *adapter,
+ 	}
+ 
+ 	/*
+-	 * Injection currently transmits via WMI mgmt-tx path, so only 802.11
+-	 * management frames are supported on this path.
++	 * Determine 802.11 frame type for routing decisions downstream.
++	 * Management frames  (type 0x00) → WMI mgmt TX path
++	 * Data frames        (type 0x08) → CDP raw data TX path
++	 * Control frames     (type 0x04) → Best-effort via WMI mgmt TX
++	 *
++	 * All three types are accepted for injection.  Tools like
++	 * aireplay-ng inject data frames (ARP replay, chopchop,
++	 * fragmentation) and control frames (RTS for CTS-forcing).
+ 	 */
+ 	frame_type = req->frame_data[0] & 0x0c;
+-	if (frame_type != 0x00) {
++	switch (frame_type) {
++	case 0x00: /* Management */
++		hdd_inject_debug("Management frame injection: subtype=0x%02x len=%u",
++				 req->frame_data[0] & 0xf0, req->frame_len);
++		break;
++	case 0x08: /* Data */
++		hdd_inject_debug("Data frame injection: subtype=0x%02x len=%u",
++				 req->frame_data[0] & 0xf0, req->frame_len);
++		break;
++	case 0x04: /* Control */
++		hdd_inject_debug("Control frame injection: subtype=0x%02x len=%u",
++				 req->frame_data[0] & 0xf0, req->frame_len);
++		break;
++	default:
+ 		hdd_update_injection_stats(adapter, HDD_INJECTION_STAT_VALIDATION_FAILURES, 1);
+-		hdd_inject_warn("Dropping non-management injection frame: fc_type=0x%02x len=%u",
++		hdd_inject_warn("Dropping frame with invalid type: fc_type=0x%02x len=%u",
+ 				frame_type, req->frame_len);
+-		return QDF_STATUS_E_NOSUPPORT;
++		return QDF_STATUS_E_INVAL;
+ 	}
+ 
+ 	/* Queue frame for injection */
+ 	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+-	
++
+ 	/* Check queue size limit */
+-	if (qdf_list_size(&injection_ctx->injection_queue) >= 
++	if (qdf_list_size(&injection_ctx->injection_queue) >=
+ 	    injection_ctx->security_ctx.config.max_queue_size) {
+ 		qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+ 		hdd_update_injection_stats(adapter, HDD_INJECTION_STAT_QUEUE_OVERFLOWS, 1);
+ 		hdd_inject_warn("Injection queue is full");
+ 		return QDF_STATUS_E_RESOURCES;
+ 	}
+-	
++
+ 	status = qdf_list_insert_back(&injection_ctx->injection_queue, &req->node);
+ 	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+ 
+@@ -554,14 +589,14 @@ int hdd_frame_inject_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ 	status = hdd_process_frame_injection(adapter, req);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+ 		hdd_inject_err("Failed to process injection request: %d", status);
+-		
++
+ 		/* Cleanup on failure */
+ 		if (req) {
+ 			if (req->frame_data)
+ 				qdf_mem_free(req->frame_data);
+ 			qdf_mem_free(req);
+ 		}
+-		
++
+ 		return qdf_status_to_os_return(status);
+ 	}
+ 
+@@ -667,9 +702,76 @@ void hdd_process_injection_queue_work(void *arg)
+ 				}
+ 			}
+ 
+-			wma_status = wma_queue_injection_frame(
+-				(tp_wma_handle)injection_ctx->wma_handle, req,
+-				tx_vdev_id);
++			wma_status = QDF_STATUS_E_FAILURE;
++
++			/*
++			 * Route frames based on 802.11 type:
++			 *
++			 * Management (0x00): WMI mgmt TX via WMA queue
++			 *   - Uses helper STA vdev for monitor mode
++			 *   - Firmware handles rate control and retries
++			 *
++			 * Data (0x08): CDP raw non-standard TX
++			 *   - Goes through the data path directly
++			 *   - Required for aireplay-ng ARP replay,
++			 *     chopchop, fragmentation attacks
++			 *
++			 * Control (0x04): Best-effort via WMI mgmt TX
++			 *   - Most firmware won't actually TX pure control
++			 *     frames but will accept the WMI command
++			 *   - RTS injection for CTS-forcing may work
++			 *     depending on firmware build
++			 */
++			{
++				uint8_t fc_type = req->frame_data[0] & 0x0c;
++
++				if (fc_type == 0x08) {
++					/* Data frame: use CDP raw TX path */
++					qdf_nbuf_t nbuf;
++					void *data_soc;
++
++					data_soc = cds_get_context(QDF_MODULE_ID_SOC);
++					if (!data_soc) {
++						hdd_inject_err("CDP SOC not available for data TX");
++						wma_status = QDF_STATUS_E_FAILURE;
++						goto inject_done;
++					}
++
++					nbuf = qdf_nbuf_alloc(NULL, req->frame_len, 0, 0, false);
++					if (!nbuf) {
++						hdd_inject_err("Failed to alloc nbuf for data injection");
++						wma_status = QDF_STATUS_E_NOMEM;
++						goto inject_done;
++					}
++
++					qdf_mem_copy(qdf_nbuf_put_tail(nbuf, req->frame_len),
++						     req->frame_data, req->frame_len);
++
++					/*
++					 * cdp_tx_non_std sends a raw 802.11 frame through
++					 * the firmware data path.  OL_TX_SPEC_RAW tells the
++					 * datapath to transmit the buffer as-is without
++					 * 802.3→802.11 encapsulation.
++					 */
++					if (cdp_tx_non_std(data_soc, tx_vdev_id,
++							   OL_TX_SPEC_RAW, nbuf) != NULL) {
++						/* nbuf was not consumed — TX failed */
++						qdf_nbuf_free(nbuf);
++						hdd_inject_err("CDP raw data TX rejected for vdev %u",
++							       tx_vdev_id);
++						wma_status = QDF_STATUS_E_FAILURE;
++					} else {
++						/* nbuf consumed by CDP — success */
++						wma_status = QDF_STATUS_SUCCESS;
++					}
++				} else {
++					/* Management or control frame: WMI mgmt TX */
++					wma_status = wma_queue_injection_frame(
++						(tp_wma_handle)injection_ctx->wma_handle, req,
++						tx_vdev_id);
++				}
++			}
++inject_done:
+ 
+ 			/* Update timing for completion */
+ 			req->complete_time = qdf_get_log_timestamp();
+@@ -826,11 +928,11 @@ int hdd_frame_inject_netlink(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 	status = hdd_process_frame_injection(adapter, req);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+ 		hdd_inject_err("Failed to process injection request: %d", status);
+-		
++
+ 		/* Cleanup on failure */
+ 		qdf_mem_free(frame_data);
+ 		qdf_mem_free(req);
+-		
++
+ 		return qdf_status_to_os_return(status);
+ 	}
+ 
+@@ -1162,27 +1264,27 @@ QDF_STATUS hdd_reset_injection_state(struct hdd_adapter *adapter)
+ 
+ 	/* Clear injection queue if it has stale entries */
+ 	qdf_spin_lock_bh(&injection_ctx->queue_lock);
+-	
++
+ 	status = qdf_list_peek_front(&injection_ctx->injection_queue, &node);
+ 	while (QDF_IS_STATUS_SUCCESS(status)) {
+ 		req = qdf_container_of(node, struct inject_frame_req, node);
+-		
++
+ 		/* Check if request is too old (older than 5 seconds) */
+ 		if ((qdf_get_log_timestamp() - req->timestamp) > 5000000) {
+ 			status = qdf_list_peek_next(&injection_ctx->injection_queue, node, &next_node);
+ 			qdf_list_remove_node(&injection_ctx->injection_queue, node);
+-			
++
+ 			if (req->frame_data)
+ 				qdf_mem_free(req->frame_data);
+ 			qdf_mem_free(req);
+-			
++
+ 			node = next_node;
+ 		} else {
+ 			status = qdf_list_peek_next(&injection_ctx->injection_queue, node, &next_node);
+ 			node = next_node;
+ 		}
+ 	}
+-	
++
+ 	qdf_spin_unlock_bh(&injection_ctx->queue_lock);
+ 
+ 	hdd_inject_info("Injection state reset completed for adapter %pK", adapter);
+@@ -1287,7 +1389,7 @@ QDF_STATUS hdd_handle_injection_degradation(struct hdd_adapter *adapter,
+ 	switch (resource_type) {
+ 	case 1: /* Queue pressure */
+ 		hdd_inject_warn("Queue pressure detected, reducing queue size");
+-		
++
+ 		/* Reduce queue size by 50% */
+ 		config->max_queue_size = config->max_queue_size / 2;
+ 		if (config->max_queue_size < 8) {
+@@ -1316,7 +1418,7 @@ QDF_STATUS hdd_handle_injection_degradation(struct hdd_adapter *adapter,
+ 
+ 	case 2: /* Memory pressure */
+ 		hdd_inject_warn("Memory pressure detected, reducing frame rate");
+-		
++
+ 		/* Reduce frame rate by 50% */
+ 		config->max_frame_rate = config->max_frame_rate / 2;
+ 		if (config->max_frame_rate < 10) {
+@@ -1326,20 +1428,20 @@ QDF_STATUS hdd_handle_injection_degradation(struct hdd_adapter *adapter,
+ 		/* Clear current rate limiting window to apply new rate immediately */
+ 		injection_ctx->security_ctx.current_rate_count = 0;
+ 		injection_ctx->security_ctx.rate_limit_start_time = qdf_get_log_timestamp();
+-		
++
+ 		hdd_inject_info("Reduced frame rate to %u fps due to memory pressure",
+ 				config->max_frame_rate);
+ 		break;
+ 
+ 	case 3: /* CPU pressure */
+ 		hdd_inject_warn("CPU pressure detected, increasing rate window");
+-		
++
+ 		/* Increase rate limiting window to reduce CPU load */
+ 		config->rate_window_ms = config->rate_window_ms * 2;
+ 		if (config->rate_window_ms > 10000) {
+ 			config->rate_window_ms = 10000; /* Maximum 10 second window */
+ 		}
+-		
++
+ 		hdd_inject_info("Increased rate window to %u ms due to CPU pressure",
+ 				config->rate_window_ms);
+ 		break;
+@@ -1380,7 +1482,7 @@ void hdd_injection_recovery_work(void *arg)
+ 	switch (recovery_ctx->last_error.error_type) {
+ 	case HDD_INJECTION_ERROR_FIRMWARE:
+ 		hdd_inject_info("Performing firmware error recovery");
+-		
++
+ 		/* Reset injection state */
+ 		status = hdd_reset_injection_state(adapter);
+ 		if (QDF_IS_STATUS_ERROR(status)) {
+@@ -1407,7 +1509,7 @@ void hdd_injection_recovery_work(void *arg)
+ 
+ 	/* Clear recovery in progress flag */
+ 	recovery_ctx->recovery_in_progress = false;
+-	
++
+ 	if (recovery_ctx->consecutive_errors > 10) {
+ 		hdd_inject_warn("Too many consecutive errors (%u), disabling injection",
+ 				recovery_ctx->consecutive_errors);
+@@ -1445,7 +1547,7 @@ void hdd_injection_recovery_timer(void *arg)
+ 	/* Check if recovery is still in progress */
+ 	if (recovery_ctx->recovery_in_progress) {
+ 		uint64_t recovery_duration = qdf_get_log_timestamp() - recovery_ctx->recovery_start_time;
+-		
++
+ 		hdd_inject_warn("Recovery timeout after %llu ms, forcing reset",
+ 				recovery_duration / 1000);
+ 
+@@ -1504,7 +1606,7 @@ QDF_STATUS hdd_get_injection_stats(struct hdd_adapter *adapter,
+ 			stats->frames_dropped += wma_stats.frames_dropped;
+ 			stats->queue_overflows += wma_stats.queue_overflows;
+ 			stats->firmware_errors += wma_stats.fw_errors;
+-			
++
+ 			/* Update timing statistics */
+ 			if (wma_stats.frames_processed > 0) {
+ 				stats->total_inject_time += wma_stats.total_queue_time;
+@@ -1701,9 +1803,7 @@ QDF_STATUS hdd_update_injection_throughput(struct hdd_adapter *adapter)
+ 	struct hdd_injection_ctx *injection_ctx;
+ 	struct injection_stats *stats;
+ 	uint64_t current_time;
+-	uint64_t time_window_ms = 1000; /* 1 second window */
+-	static uint64_t last_throughput_update = 0;
+-	static uint64_t frames_in_window = 0;
++	uint64_t time_window_us = 1000000; /* 1 second in microseconds */
+ 
+ 	if (!adapter) {
+ 		hdd_inject_err("Invalid adapter parameter");
+@@ -1720,29 +1820,30 @@ QDF_STATUS hdd_update_injection_throughput(struct hdd_adapter *adapter)
+ 	current_time = qdf_get_log_timestamp();
+ 
+ 	/* Initialize on first call */
+-	if (last_throughput_update == 0) {
+-		last_throughput_update = current_time;
+-		frames_in_window = 1;
++	if (stats->throughput_window_start == 0) {
++		stats->throughput_window_start = current_time;
++		stats->throughput_frames_in_window = 1;
+ 		return QDF_STATUS_SUCCESS;
+ 	}
+ 
+-	frames_in_window++;
++	stats->throughput_frames_in_window++;
+ 
+ 	/* Calculate throughput every second */
+-	if (current_time - last_throughput_update >= time_window_ms * 1000) {
+-		uint32_t throughput_fps = (frames_in_window * 1000000) / 
+-					  (current_time - last_throughput_update);
+-		
++	if (current_time - stats->throughput_window_start >= time_window_us) {
++		uint32_t throughput_fps =
++			(stats->throughput_frames_in_window * 1000000) /
++			(current_time - stats->throughput_window_start);
++
+ 		stats->current_throughput_fps = throughput_fps;
+-		
++
+ 		/* Update peak throughput */
+ 		if (throughput_fps > stats->peak_throughput_fps) {
+ 			stats->peak_throughput_fps = throughput_fps;
+ 		}
+ 
+ 		/* Reset for next window */
+-		last_throughput_update = current_time;
+-		frames_in_window = 0;
++		stats->throughput_window_start = current_time;
++		stats->throughput_frames_in_window = 0;
+ 	}
+ 
+ 	return QDF_STATUS_SUCCESS;
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_comprehensive_test.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_comprehensive_test.c
+index c06a45c0ac34..a15b73e0f4b6 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_comprehensive_test.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_comprehensive_test.c
+@@ -616,7 +616,7 @@ QDF_STATUS hdd_comprehensive_test_suite(struct hdd_context *hdd_ctx)
+ 	/* Test different load conditions */
+ 	for (uint32_t load_type = 1; load_type <= 4; load_type++) {
+ 		hdd_comp_test_info("--- Performance Test %u: Load Type %u ---", load_type, load_type);
+-		
++
+ 		status = hdd_test_performance_under_load(test_adapter, load_type, &perf_stats);
+ 		if (QDF_IS_STATUS_ERROR(status)) {
+ 			perf_tests_passed = false;
+@@ -640,7 +640,7 @@ QDF_STATUS hdd_comprehensive_test_suite(struct hdd_context *hdd_ctx)
+ 	/* Major Test Suite 5: Extended Stability Test */
+ 	hdd_comp_test_info("=== Major Test Suite 5: Extended Stability Test ===");
+ 	major_test_suites_run++;
+-	
++
+ 	/* Run stability test for 2 minutes (reduced for testing) */
+ 	status = hdd_test_stability_extended_operation(test_adapter, 2);
+ 	if (QDF_IS_STATUS_SUCCESS(status)) {
+@@ -671,4 +671,4 @@ QDF_STATUS hdd_comprehensive_test_suite(struct hdd_context *hdd_ctx)
+ 	return all_tests_passed ? QDF_STATUS_SUCCESS : QDF_STATUS_E_FAILURE;
+ }
+ 
+-#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+\ No newline at end of file
++#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_debug.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_debug.c
+index e563eb24f439..4dbaf43e4dbe 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_debug.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_debug.c
+@@ -347,7 +347,7 @@ static ssize_t hdd_injection_sysfs_global_enable_store(struct kobject *kobj,
+ 
+ 	g_injection_global_enable = enable;
+ 	pr_info("Frame injection global enable set to: %s\n", enable ? "true" : "false");
+-	
++
+ 	return count;
+ }
+ 
+@@ -754,4 +754,4 @@ bool hdd_injection_is_globally_enabled(void)
+ 	return g_injection_global_enable;
+ }
+ 
+-#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+\ No newline at end of file
++#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_security_test.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_security_test.c
+index c5c52b20bac6..f4901901befd 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_security_test.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_security_test.c
+@@ -180,7 +180,7 @@ QDF_STATUS hdd_test_capability_checking(struct hdd_adapter *adapter)
+ 
+ 		/* This should trigger audit logging */
+ 		status = hdd_validate_injection_permissions(adapter, &test_req);
+-		
++
+ 		/* Check if audit log was generated (we can't easily verify the log content,
+ 		 * but we can check that the function behaved correctly) */
+ 		if (status == QDF_STATUS_E_PERM) {
+@@ -331,7 +331,7 @@ QDF_STATUS hdd_test_rate_limiting_attack_scenarios(struct hdd_adapter *adapter)
+ 
+ 		/* Wait for next time window */
+ 		qdf_sleep(security_ctx->config.rate_window_ms + 100);
+-		
++
+ 		/* Reset for next window */
+ 		security_ctx->current_rate_count = 0;
+ 		security_ctx->rate_limit_start_time = qdf_get_log_timestamp();
+@@ -570,7 +570,7 @@ QDF_STATUS hdd_test_audit_logging_completeness(struct hdd_adapter *adapter)
+ 
+ 	/* Test that log entries contain accurate process and frame information */
+ 	/* This is more of a functional test since we can't easily inspect log contents */
+-	
++
+ 	test_req.session_id = 50003;
+ 	test_req.timestamp = qdf_get_log_timestamp();
+ 	test_req.frame_len = 100; /* Specific frame length for testing */
+@@ -711,4 +711,4 @@ QDF_STATUS hdd_security_validation_test_suite(struct hdd_adapter *adapter)
+ 	return all_tests_passed ? QDF_STATUS_SUCCESS : QDF_STATUS_E_FAILURE;
+ }
+ 
+-#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+\ No newline at end of file
++#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_test.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_test.c
+index 4ae0ab1d835d..fe08fbc17b81 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_test.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_inject_test.c
+@@ -78,7 +78,7 @@ static bool hdd_injection_test_assert(bool condition, const char *test_name,
+ 				       const char *description)
+ {
+ 	g_test_stats.assertions_checked++;
+-	
++
+ 	if (condition) {
+ 		hdd_test_info("%s: PASS - %s", test_name, description);
+ 		return true;
+@@ -418,7 +418,7 @@ static bool hdd_injection_test_concurrent_operations(struct hdd_adapter *adapter
+ 	/* Test that injection context can handle multiple requests */
+ 	if (req1 && req2) {
+ 		req2->session_id = 2; /* Different session ID */
+-		
++
+ 		/* These might fail due to missing validation functions, but should not crash */
+ 		status = hdd_process_frame_injection(adapter, req1);
+ 		test_passed &= hdd_injection_test_assert(status != QDF_STATUS_E_NULL_VALUE,
+@@ -564,4 +564,4 @@ QDF_STATUS hdd_injection_get_test_stats(struct hdd_injection_test_stats *stats)
+ 	return QDF_STATUS_SUCCESS;
+ }
+ 
+-#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+\ No newline at end of file
++#endif /* FEATURE_FRAME_INJECTION_SUPPORT */
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_validate.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_validate.c
+old mode 100644
+new mode 100755
+index fdd2dab12401..7d9d3753cfc7
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_validate.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_frame_validate.c
+@@ -190,8 +190,8 @@ static QDF_STATUS hdd_validate_mgmt_frame(uint8_t *frame_data,
+ 		if (frame_len >= min_size) {
+ 			/* Validate beacon interval (should be reasonable) */
+ 			uint16_t beacon_interval = *(uint16_t *)(payload + 8);
+-			if (beacon_interval == 0 || beacon_interval > 65535) {
+-				hdd_validate_warn("Invalid beacon interval: %u", beacon_interval);
++			if (beacon_interval == 0 || beacon_interval > 10000) {
++				hdd_validate_warn("Invalid beacon interval: %u TU", beacon_interval);
+ 			}
+ 		}
+ 		break;
+@@ -453,22 +453,22 @@ static QDF_STATUS hdd_validate_data_frame(uint8_t *frame_data,
+ 		uint32_t qos_offset = sizeof(struct ieee80211_frame);
+ 		if (has_addr4)
+ 			qos_offset += QDF_MAC_ADDR_SIZE;
+-		
++
+ 		if (frame_len > qos_offset + 1) {
+ 			qos_ptr = frame_data + qos_offset;
+ 			tid = qos_ptr[0] & IEEE80211_QOS_TID;
+ 			ack_policy = (qos_ptr[0] >> IEEE80211_QOS_ACKPOLICY_S) & 0x03;
+-			
++
+ 			/* Validate TID */
+ 			if (tid > 15) {
+ 				hdd_validate_warn("Invalid QoS TID: %u", tid);
+ 			}
+-			
++
+ 			/* Validate ACK policy */
+ 			if (ack_policy > 3) {
+ 				hdd_validate_warn("Invalid QoS ACK policy: %u", ack_policy);
+ 			}
+-			
++
+ 			/* Check A-MSDU bit */
+ 			if (qos_ptr[0] & IEEE80211_QOS_AMSDU) {
+ 				hdd_validate_debug("A-MSDU frame detected");
+@@ -505,11 +505,11 @@ static QDF_STATUS hdd_validate_data_frame(uint8_t *frame_data,
+ 	seq_ctrl = *(uint16_t *)frame->i_seq;
+ 	seq_num = (seq_ctrl & IEEE80211_SEQ_SEQ_MASK) >> IEEE80211_SEQ_SEQ_SHIFT;
+ 	frag_num = seq_ctrl & IEEE80211_SEQ_FRAG_MASK;
+-	
++
+ 	if (seq_num >= IEEE80211_SEQ_MAX) {
+ 		hdd_validate_warn("Invalid sequence number: %u", seq_num);
+ 	}
+-	
++
+ 	if (frag_num > 15) {
+ 		hdd_validate_warn("Invalid fragment number: %u", frag_num);
+ 	}
+@@ -654,9 +654,18 @@ QDF_STATUS hdd_sanitize_frame_content(uint8_t *frame_data, uint32_t frame_len)
+ 	frame_type = frame->i_fc[0] & IEEE80211_FC0_TYPE_MASK;
+ 	frame_subtype = frame->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+ 
+-	/* Clear reserved bits in frame control */
+-	frame->i_fc[0] &= ~0x03; /* Clear version bits (should be 00) */
+-	frame->i_fc[1] &= ~0x40; /* Clear reserved bit */
++	/*
++	 * Sanitize frame control field.
++	 *
++	 * FC byte 0 bits [1:0] = Protocol Version (must be 0 for 802.11).
++	 * Already validated by hdd_validate_frame_header(), but enforce here
++	 * as a safety net.
++	 *
++	 * FC byte 1 bit 6 = Order bit.  This is NOT reserved — it indicates
++	 * the presence of the HT Control field (+HTC) in 802.11n/ac/ax QoS
++	 * data and management frames.  Do NOT clear it.
++	 */
++	frame->i_fc[0] &= ~0x03; /* Force protocol version to 0 */
+ 
+ 	/* Sanitize based on frame type */
+ 	switch (frame_type) {
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_inject_security.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_inject_security.c
+old mode 100644
+new mode 100755
+index 4971efcce7ac..086af1ed09cb
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_inject_security.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_inject_security.c
+@@ -31,6 +31,7 @@
+ #include <qdf_mem.h>
+ #include <qdf_trace.h>
+ #include <qdf_time.h>
++#include <qdf_mc_timer.h>
+ 
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ 
+@@ -70,7 +71,7 @@ struct injection_session {
+  */
+ static uint64_t hdd_get_current_time_ms(void)
+ {
+-	return qdf_get_log_timestamp();
++	return (uint64_t)qdf_get_time_of_the_day_ms();
+ }
+ 
+ /**
+@@ -137,19 +138,19 @@ QDF_STATUS hdd_deinit_injection_security_ctx(struct injection_security_ctx *secu
+ 
+ 	/* Clean up active sessions */
+ 	qdf_spin_lock_bh(&security_ctx->session_lock);
+-	
++
+ 	status = qdf_list_peek_front(&security_ctx->active_sessions, &node);
+ 	while (QDF_IS_STATUS_SUCCESS(status)) {
+ 		session = qdf_container_of(node, struct injection_session, node);
+-		
++
+ 		status = qdf_list_peek_next(&security_ctx->active_sessions, node, &next_node);
+-		
++
+ 		qdf_list_remove_node(&security_ctx->active_sessions, node);
+ 		qdf_mem_free(session);
+-		
++
+ 		node = next_node;
+ 	}
+-	
++
+ 	qdf_spin_unlock_bh(&security_ctx->session_lock);
+ 
+ 	/* Destroy session list and lock */
+@@ -192,7 +193,7 @@ QDF_STATUS hdd_check_injection_capability(struct task_struct *task)
+ 
+ 	/* Check for CAP_NET_RAW capability */
+ 	has_capability = capable(CAP_NET_RAW);
+-	
++
+ 	put_cred(cred);
+ 
+ 	if (!has_capability) {
+@@ -270,19 +271,19 @@ static struct injection_session *hdd_find_injection_session(
+ 	QDF_STATUS status;
+ 
+ 	qdf_spin_lock_bh(&security_ctx->session_lock);
+-	
++
+ 	status = qdf_list_peek_front(&security_ctx->active_sessions, &node);
+ 	while (QDF_IS_STATUS_SUCCESS(status)) {
+ 		session = qdf_container_of(node, struct injection_session, node);
+-		
++
+ 		if (session->session_id == session_id) {
+ 			qdf_spin_unlock_bh(&security_ctx->session_lock);
+ 			return session;
+ 		}
+-		
++
+ 		status = qdf_list_peek_next(&security_ctx->active_sessions, node, &node);
+ 	}
+-	
++
+ 	qdf_spin_unlock_bh(&security_ctx->session_lock);
+ 	return NULL;
+ }
+@@ -309,6 +310,12 @@ QDF_STATUS hdd_apply_injection_rate_limit(struct hdd_adapter *adapter)
+ 
+ 	security_ctx = &adapter->injection_ctx->security_ctx;
+ 	current_time = hdd_get_current_time_ms();
++
++	/*
++	 * Refresh rate limit params from global sysfs-configurable values
++	 * so that runtime changes via sysfs take effect immediately.
++	 */
++	hdd_injection_get_global_config(&security_ctx->config);
+ 	max_rate = security_ctx->config.max_frame_rate;
+ 	window_ms = security_ctx->config.rate_window_ms;
+ 
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
+index 85be02843a76..9ce5a8f28c22 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_ioctl.c
+@@ -7594,7 +7594,7 @@ static int __hdd_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ 		goto exit;
+ 
+ 	hdd_info("Received ioctl command: 0x%x", cmd);
+-	
++
+ 	switch (cmd) {
+ 	case (SIOCDEVPRIVATE + 1):
+ 		hdd_info("Processing SIOCDEVPRIVATE+1 ioctl");
+@@ -7605,9 +7605,38 @@ static int __hdd_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ 		break;
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
+ 	case SIOCDEVPRIVATE_FRAME_INJECT:
++	{
++		/*
++		 * __hdd_ioctl() receives 'void __user *data' (already
++		 * unwrapped from ifr->ifr_data by the caller hdd_ioctl /
++		 * hdd_dev_private_ioctl).  hdd_frame_inject_ioctl() needs a
++		 * struct ifreq whose ifr_data points at the userspace buffer,
++		 * so reconstruct one on the stack.
++		 */
++		struct ifreq ifr_local;
++
++		/* Clear the local ifreq structure */
++		memset(&ifr_local, 0, sizeof(ifr_local));
++
++		/* Copy the interface name */
++		strlcpy(ifr_local.ifr_name, dev->name,
++			sizeof(ifr_local.ifr_name));
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
++		/* Linux 5.15+ : reconstruct using original ifr pointer */
++		ifr_local.ifr_data = (void __force *)ifr->ifr_data;
++#else
++		/* Linux 5.4 : use ifr->ifr_data directly instead of undefined 'data' */
++		ifr_local.ifr_data = (void __force *)ifr->ifr_data;
++#endif
++
++		/* Log ioctl processing */
+ 		hdd_info("Processing frame injection ioctl: 0x%x", cmd);
+-		ret = hdd_frame_inject_ioctl(dev, ifr, cmd);
++
++		/* Call the injection handler with the reconstructed ifreq */
++		ret = hdd_frame_inject_ioctl(dev, &ifr_local, cmd);
+ 		break;
++	}
+ #else
+ 	case SIOCDEVPRIVATE_FRAME_INJECT:
+ 		hdd_warn("Frame injection not compiled in");
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index f664f3f0ef0d..4e4af3045998 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -5411,12 +5411,25 @@ static const struct net_device_ops wlan_drv_ops = {
+ };
+ 
+ #ifdef FEATURE_MONITOR_MODE_SUPPORT
+-/* Monitor mode net_device_ops, doesnot Tx and most of operations. */
++/*
++ * Monitor mode net_device_ops.
++ *
++ * Includes ioctl handlers so that SIOCDEVPRIVATE_FRAME_INJECT works on
++ * monitor interfaces, and ndo_set_mac_address for MAC spoofing which is
++ * commonly used alongside monitor mode injection tools.
++ */
+ static const struct net_device_ops wlan_mon_drv_ops = {
+ 	.ndo_open = hdd_mon_open,
+ 	.ndo_stop = hdd_stop,
+ 	.ndo_start_xmit = hdd_hard_start_xmit,
+ 	.ndo_get_stats = hdd_get_stats,
++	.ndo_set_mac_address = hdd_set_mac_address,
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
++	.ndo_do_ioctl = hdd_ioctl,
++#endif
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	.ndo_siocdevprivate = hdd_dev_private_ioctl,
++#endif
+ };
+ 
+ /**
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index 108b86d7e8a2..d9f55b51b765 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -37,8 +37,6 @@
+ #include <cds_sched.h>
+ #include <cds_utils.h>
+ 
+-#include <net/ieee80211_radiotap.h>
+-
+ #include <wlan_hdd_p2p.h>
+ #include <linux/wireless.h>
+ #include <net/cfg80211.h>
+@@ -65,8 +63,10 @@
+ 
+ #include "wlan_hdd_nud_tracking.h"
+ #include "dp_txrx.h"
+-#ifdef WLAN_SUPPORT_RX_FISA
++#if defined(WLAN_SUPPORT_RX_FISA)
+ #include "dp_fisa_rx.h"
++#else
++#include <net/ieee80211_radiotap.h>
+ #endif
+ #include <ol_defines.h>
+ #include "cfg_ucfg_api.h"
+@@ -897,6 +897,461 @@ void hdd_get_transmit_mac_addr(struct hdd_adapter *adapter, struct sk_buff *skb,
+ }
+ 
+ #ifdef FEATURE_FRAME_INJECTION_SUPPORT
++/**
++ * struct ieee80211_radiotap_header - Radiotap header for 802.11 (Wi-Fi) packets.
++ * Contains metadata like version, length, and flags for additional data.
++ */
++struct ieee80211_radiotap_header {
++		uint8_t it_version;	/* Header version */
++		uint8_t it_pad;		/* Padding for alignment */
++		__le16 it_len;		/* Length of the header in bytes */
++		__le32 it_present;	/* Bitmask indicating the presence of additional data */
++}		__packed;
++
++/**
++ * ieee80211_get_radiotap_len - Returns the length of the Radiotap header.
++ * @data: Pointer to the start of the Radiotap header data.
++ * Returns the length in Little Endian format.
++ */
++static inline uint16_t ieee80211_get_radiotap_len(const uint8_t *data)
++{
++		struct ieee80211_radiotap_header *hdr = (void *)data;	/* Cast to header structure */
++		return get_unaligned_le16(&hdr->it_len);	/* Get header length in LE format */
++}
++
++/**
++ * Radiotap field bit positions (IEEE 802.11-2016 §9.14.3).
++ * Only the fields relevant to TX injection are defined here.
++ */
++#define RADIOTAP_F_TSFT           0
++#define RADIOTAP_F_FLAGS          1
++#define RADIOTAP_F_RATE           2
++#define RADIOTAP_F_CHANNEL        3
++#define RADIOTAP_F_FHSS           4
++#define RADIOTAP_F_DBM_ANTSIGNAL  5
++#define RADIOTAP_F_DBM_ANTNOISE   6
++#define RADIOTAP_F_LOCK_QUALITY   7
++#define RADIOTAP_F_TX_ATTENUATION 8
++#define RADIOTAP_F_DB_TX_ATTENUATION 9
++#define RADIOTAP_F_DBM_TX_POWER  10
++#define RADIOTAP_F_ANTENNA       11
++#define RADIOTAP_F_DB_ANTSIGNAL  12
++#define RADIOTAP_F_DB_ANTNOISE   13
++#define RADIOTAP_F_RX_FLAGS      14
++#define RADIOTAP_F_TX_FLAGS      15
++#define RADIOTAP_F_RTS_RETRIES   16
++#define RADIOTAP_F_DATA_RETRIES  17
++#define RADIOTAP_F_XCHANNEL      18
++#define RADIOTAP_F_MCS           19
++#define RADIOTAP_F_AMPDU         20  /* A-MPDU Status (IEEE 802.11-2020 §9.14.3.8) */
++#define RADIOTAP_F_VHT           21  /* VHT (IEEE 802.11-2020 §9.14.3.11) */
++#define RADIOTAP_F_TIMESTAMP     22  /* Timestamp */
++#define RADIOTAP_F_HE            23  /* 802.11ax HE (IEEE 802.11ax-2021 §9.14.3.14) */
++
++/* Radiotap TX flags (field 15) */
++#define RADIOTAP_F_TX_NOACK  0x0008
++#define RADIOTAP_F_TX_NOSEQNO 0x0010
++
++/* Radiotap FLAGS (field 1) bits */
++#define RADIOTAP_F_WEP     0x04
++#define RADIOTAP_F_FRAG    0x08
++
++/* Radiotap MCS known bits (field 19, byte 0) */
++#define RADIOTAP_MCS_HAVE_BW    0x01
++#define RADIOTAP_MCS_HAVE_MCS   0x02
++#define RADIOTAP_MCS_HAVE_GI    0x04
++#define RADIOTAP_MCS_HAVE_FMT   0x08
++#define RADIOTAP_MCS_HAVE_FEC   0x10
++#define RADIOTAP_MCS_HAVE_STBC  0x20
++
++/* Radiotap MCS flags (field 19, byte 1) */
++#define RADIOTAP_MCS_BW_MASK    0x03
++#define RADIOTAP_MCS_BW_20      0x00
++#define RADIOTAP_MCS_BW_40      0x01
++#define RADIOTAP_MCS_SGI        0x04
++#define RADIOTAP_MCS_FMT_GF     0x08  /* Greenfield */
++#define RADIOTAP_MCS_FEC_LDPC   0x10
++#define RADIOTAP_MCS_STBC_MASK  0x60
++#define RADIOTAP_MCS_STBC_SHIFT 5
++
++/* Radiotap VHT known bits (field 21, bytes 0-1, u16 LE) */
++#define RADIOTAP_VHT_KNOWN_STBC         BIT(0)
++#define RADIOTAP_VHT_KNOWN_GI           BIT(2)
++#define RADIOTAP_VHT_KNOWN_LDPC_OFDM    BIT(4)
++#define RADIOTAP_VHT_KNOWN_BEAMFORMED   BIT(5)
++#define RADIOTAP_VHT_KNOWN_BANDWIDTH    BIT(6)
++
++/* Radiotap VHT flags byte (field 21, byte 2) */
++#define RADIOTAP_VHT_FLAG_STBC          BIT(0)
++#define RADIOTAP_VHT_FLAG_SGI           BIT(2)
++#define RADIOTAP_VHT_FLAG_LDPC_OFDM     BIT(4)
++#define RADIOTAP_VHT_FLAG_BEAMFORMED    BIT(5)
++
++/*
++ * VHT bandwidth field values (byte 3 of VHT radiotap field):
++ *   0  = 20 MHz,  1-3  = 40 MHz variants,
++ *   4-10 = 80 MHz variants, 11+ = 160 MHz variants.
++ */
++#define RADIOTAP_VHT_BW_20_THRESH    1   /* values < 1 → 20 MHz */
++#define RADIOTAP_VHT_BW_80_THRESH    4   /* values 4-10 → 80 MHz */
++#define RADIOTAP_VHT_BW_160_THRESH  11   /* values >= 11 → 160 MHz */
++
++/* Radiotap HE known bits (field 23, data1 u16 LE) */
++#define RADIOTAP_HE_DATA1_DATA_MCS_KNOWN    BIT(8)
++#define RADIOTAP_HE_DATA1_CODING_KNOWN      BIT(10)
++#define RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN BIT(15)
++
++/* Radiotap HE data3 (field 23, bytes 4-5, u16 LE) */
++#define RADIOTAP_HE_DATA3_DATA_MCS          0x000F
++#define RADIOTAP_HE_DATA3_CODING            BIT(5)   /* 0=BCC, 1=LDPC */
++
++/* Radiotap HE data5 (field 23, bytes 8-9, u16 LE) */
++#define RADIOTAP_HE_DATA5_BW_RU_ALLOC_MASK 0x000F
++#define RADIOTAP_HE_DATA5_GI_MASK          0x0060
++#define RADIOTAP_HE_DATA5_GI_0_8_US        0x0000
++
++/* Radiotap HE data6 (field 23, bytes 10-11, u16 LE) */
++#define RADIOTAP_HE_DATA6_NSTS_MASK        0x000F
++
++/*
++ * Per-field {size, alignment} for radiotap fields 0..23.
++ * Used to advance the pointer correctly when skipping fields.
++ * IEEE 802.11-2020 §9.14.3 / radiotap.org field list.
++ */
++struct radiotap_field_info {
++	uint8_t size;
++	uint8_t align;
++};
++
++static const struct radiotap_field_info radiotap_fields[] = {
++	[RADIOTAP_F_TSFT]              = { 8, 8 },  /* u64 */
++	[RADIOTAP_F_FLAGS]             = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_RATE]              = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_CHANNEL]           = { 4, 2 },  /* u16 freq + u16 flags */
++	[RADIOTAP_F_FHSS]              = { 2, 1 },  /* u8 hop_set + u8 hop_pattern */
++	[RADIOTAP_F_DBM_ANTSIGNAL]     = { 1, 1 },  /* s8 */
++	[RADIOTAP_F_DBM_ANTNOISE]      = { 1, 1 },  /* s8 */
++	[RADIOTAP_F_LOCK_QUALITY]      = { 2, 2 },  /* u16 */
++	[RADIOTAP_F_TX_ATTENUATION]    = { 2, 2 },  /* u16 */
++	[RADIOTAP_F_DB_TX_ATTENUATION] = { 2, 2 },  /* u16 */
++	[RADIOTAP_F_DBM_TX_POWER]      = { 1, 1 },  /* s8 */
++	[RADIOTAP_F_ANTENNA]           = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_DB_ANTSIGNAL]      = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_DB_ANTNOISE]       = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_RX_FLAGS]          = { 2, 2 },  /* u16 */
++	[RADIOTAP_F_TX_FLAGS]          = { 2, 2 },  /* u16 */
++	[RADIOTAP_F_RTS_RETRIES]       = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_DATA_RETRIES]      = { 1, 1 },  /* u8 */
++	[RADIOTAP_F_XCHANNEL]          = { 8, 4 },  /* u32 flags + u16 freq + u8 chan + u8 maxpower */
++	[RADIOTAP_F_MCS]               = { 3, 1 },  /* u8 known + u8 flags + u8 mcs */
++	[RADIOTAP_F_AMPDU]             = { 8, 4 },  /* u32 ref_num + u16 flags + u8 delimiter CRC + u8 reserved */
++	[RADIOTAP_F_VHT]               = { 12, 2 }, /* u16 known + u8 flags + u8 bw + u8[4] mcs_nss + u8 coding + u8 group_id + u16 partial_aid */
++	[RADIOTAP_F_TIMESTAMP]         = { 12, 8 }, /* u64 timestamp + u16 accuracy + u8 unit_samp + u8 flags */
++	[RADIOTAP_F_HE]                = { 12, 2 }, /* 6×u16: data1..data6 */
++};
++
++#define RADIOTAP_FIELDS_MAX  ARRAY_SIZE(radiotap_fields)
++
++/**
++ * struct hdd_radiotap_tx_params - TX parameters extracted from radiotap header
++ * @rate_100kbps: Legacy data rate in 100kbps units (0 = not specified)
++ * @tx_flags: Mapped HDD injection TX flags
++ * @channel_freq: Channel frequency in MHz (0 = not specified)
++ * @mcs_index: 802.11n MCS index (0-76, valid only if has_mcs is true)
++ * @mcs_bw: MCS bandwidth (0=20MHz, 1=40MHz)
++ * @mcs_short_gi: Short guard interval requested
++ * @mcs_greenfield: Greenfield preamble requested
++ * @mcs_ldpc: LDPC FEC requested
++ * @mcs_stbc: STBC streams (0=none)
++ * @vht_mcs: 802.11ac VHT MCS index (0-9, valid only if has_vht is true)
++ * @vht_nss: VHT spatial streams (1-8, valid only if has_vht is true)
++ * @vht_bw: VHT BW encoding: 0=20, 1=40, 2=80, 3=160 MHz
++ * @vht_short_gi: VHT short guard interval requested
++ * @vht_ldpc: VHT LDPC FEC requested
++ * @vht_stbc: VHT STBC streams (0=none)
++ * @he_mcs: 802.11ax HE MCS index (0-11, valid only if has_he is true)
++ * @he_nss: HE spatial streams (1-8, valid only if has_he is true)
++ * @he_bw: HE BW encoding: 0=20, 1=40, 2=80, 3=160 MHz
++ * @he_short_gi: HE short guard interval (0.8µs) requested
++ * @he_ldpc: HE LDPC FEC requested
++ * @has_rate: Whether legacy rate field was present
++ * @has_channel: Whether channel field was present
++ * @has_noack: Whether TX NO_ACK was requested
++ * @has_mcs: Whether MCS field was present with valid index
++ * @has_vht: Whether VHT field was present with valid MCS
++ * @has_he: Whether HE field was present with valid MCS
++ */
++struct hdd_radiotap_tx_params {
++	uint32_t rate_100kbps;
++	uint32_t tx_flags;
++	uint16_t channel_freq;
++	uint8_t mcs_index;
++	uint8_t mcs_bw;
++	bool mcs_short_gi;
++	bool mcs_greenfield;
++	bool mcs_ldpc;
++	uint8_t mcs_stbc;
++	uint8_t vht_mcs;
++	uint8_t vht_nss;
++	uint8_t vht_bw;
++	bool vht_short_gi;
++	bool vht_ldpc;
++	uint8_t vht_stbc;
++	uint8_t he_mcs;
++	uint8_t he_nss;
++	uint8_t he_bw;
++	bool he_short_gi;
++	bool he_ldpc;
++	bool has_rate;
++	bool has_channel;
++	bool has_noack;
++	bool has_mcs;
++	bool has_vht;
++	bool has_he;
++};
++
++/**
++ * hdd_parse_radiotap_tx_params() - Extract TX parameters from radiotap header
++ * @data: Pointer to start of radiotap header
++ * @len: Total length of radiotap + payload
++ * @params: Output structure for extracted parameters
++ *
++ * Walks the radiotap it_present bitmask and extracts rate, channel,
++ * TX flags, and MCS information for use in the frame injection request.
++ * Handles all standard fields 0-19 for correct pointer advancement.
++ *
++ * Return: true on success, false if header is malformed
++ */
++static bool hdd_parse_radiotap_tx_params(const uint8_t *data, uint32_t len,
++					 struct hdd_radiotap_tx_params *params)
++{
++	const struct ieee80211_radiotap_header *hdr;
++	uint16_t rtap_len;
++	uint32_t present;
++	const uint8_t *ptr;
++	const uint8_t *end;
++	int bit;
++
++	if (!data || !params || len < sizeof(*hdr))
++		return false;
++
++	memset(params, 0, sizeof(*params));
++
++	hdr = (const struct ieee80211_radiotap_header *)data;
++	if (hdr->it_version != 0)
++		return false;
++
++	rtap_len = get_unaligned_le16(&hdr->it_len);
++	if (rtap_len < sizeof(*hdr) || rtap_len > len)
++		return false;
++
++	present = get_unaligned_le32(&hdr->it_present);
++	end = data + rtap_len;
++
++	/*
++	 * Skip extended present bitmasks (bit 31 set = another u32 follows).
++	 * Each extension is a 4-byte le32 immediately after the base header.
++	 */
++	{
++		uint32_t p = present;
++		const uint8_t *ext = (const uint8_t *)&hdr->it_present;
++
++		while (p & BIT(31)) {
++			ext += 4;
++			if ((ext + 4) > end)
++				return false;
++			p = get_unaligned_le32(ext);
++		}
++		ptr = ext + 4;
++	}
++
++	/*
++	 * Walk fields 0..RADIOTAP_F_HE.  For each present field, align
++	 * the pointer, extract if it's a field we care about, then advance
++	 * past it.
++	 */
++	for (bit = 0; bit <= RADIOTAP_F_HE && ptr < end; bit++) {
++		const struct radiotap_field_info *fi;
++		unsigned long off;
++
++		if (!(present & BIT(bit)))
++			continue;
++
++		if (bit >= (int)RADIOTAP_FIELDS_MAX)
++			break;
++
++		fi = &radiotap_fields[bit];
++
++		/* Align pointer for this field */
++		if (fi->align > 1) {
++			off = ptr - data;
++			off = (off + fi->align - 1) & ~((unsigned long)fi->align - 1);
++			ptr = data + off;
++		}
++
++		/* Bounds check before reading */
++		if (ptr + fi->size > end)
++			break;
++
++		/* Extract fields we care about */
++		switch (bit) {
++		case RADIOTAP_F_RATE:
++			/* Rate in 500kbps units → convert to 100kbps */
++			params->rate_100kbps = (*ptr) * 5;
++			params->has_rate = true;
++			break;
++
++		case RADIOTAP_F_CHANNEL:
++			params->channel_freq = get_unaligned_le16(ptr);
++			params->has_channel = true;
++			break;
++
++		case RADIOTAP_F_TX_FLAGS:
++		{
++			uint16_t txf = get_unaligned_le16(ptr);
++
++			if (txf & RADIOTAP_F_TX_NOACK) {
++				params->tx_flags |= HDD_FRAME_INJECT_TX_NO_ACK;
++				params->has_noack = true;
++			}
++			break;
++		}
++
++		case RADIOTAP_F_MCS:
++		{
++			/*
++			 * MCS field: 3 bytes
++			 *   byte 0: known bitmask
++			 *   byte 1: flags (BW, GI, format, FEC, STBC)
++			 *   byte 2: MCS index (0-76)
++			 */
++			uint8_t known = ptr[0];
++			uint8_t flags = ptr[1];
++			uint8_t mcs = ptr[2];
++
++			if (known & RADIOTAP_MCS_HAVE_MCS) {
++				params->mcs_index = mcs;
++				params->has_mcs = true;
++			}
++			if (known & RADIOTAP_MCS_HAVE_BW)
++				params->mcs_bw = flags & RADIOTAP_MCS_BW_MASK;
++			if (known & RADIOTAP_MCS_HAVE_GI)
++				params->mcs_short_gi = !!(flags & RADIOTAP_MCS_SGI);
++			if (known & RADIOTAP_MCS_HAVE_FMT)
++				params->mcs_greenfield = !!(flags & RADIOTAP_MCS_FMT_GF);
++			if (known & RADIOTAP_MCS_HAVE_FEC)
++				params->mcs_ldpc = !!(flags & RADIOTAP_MCS_FEC_LDPC);
++			if (known & RADIOTAP_MCS_HAVE_STBC)
++				params->mcs_stbc = (flags & RADIOTAP_MCS_STBC_MASK)
++						   >> RADIOTAP_MCS_STBC_SHIFT;
++			break;
++		}
++
++		case RADIOTAP_F_VHT:
++		{
++			/*
++			 * VHT field: 12 bytes (IEEE 802.11-2016 §9.14.3.11)
++			 *   bytes [1:0]: known (u16 LE)
++			 *   byte  [2]:   flags
++			 *   byte  [3]:   bandwidth
++			 *   bytes [7:4]: mcs_nss[4] — per-stream MCS/NSS
++			 *                  bits[3:0] = MCS index (0-9)
++			 *                  bits[7:4] = NSS-1 (0=1 stream)
++			 *   byte  [8]:   coding (LDPC bitmask per stream)
++			 *   byte  [9]:   group_id
++			 *   bytes [11:10]: partial_aid (u16 LE)
++			 */
++			uint16_t known = get_unaligned_le16(ptr);
++			uint8_t  flags = ptr[2];
++			uint8_t  bw    = ptr[3];
++			uint8_t  mcs_nss0 = ptr[4]; /* stream 0: MCS + NSS */
++			uint8_t  coding   = ptr[8];
++			uint8_t  vht_mcs  = mcs_nss0 & 0x0F;
++			uint8_t  vht_nss  = ((mcs_nss0 >> 4) & 0x0F) + 1;
++
++			/* Only extract if stream 0 has a valid MCS */
++			if (vht_mcs <= 9 && vht_nss >= 1) {
++				params->vht_mcs = vht_mcs;
++				params->vht_nss = vht_nss;
++				params->has_vht = true;
++			}
++
++			if (known & RADIOTAP_VHT_KNOWN_GI)
++				params->vht_short_gi = !!(flags & RADIOTAP_VHT_FLAG_SGI);
++
++			if (known & RADIOTAP_VHT_KNOWN_STBC)
++				params->vht_stbc = !!(flags & RADIOTAP_VHT_FLAG_STBC);
++
++			if (known & RADIOTAP_VHT_KNOWN_LDPC_OFDM)
++				params->vht_ldpc = !!(coding & BIT(0));
++
++			/*
++			 * Map raw radiotap BW byte to our 2-bit BW encoding:
++			 *   0=20MHz, 1=40MHz, 2=80MHz, 3=160MHz
++			 */
++			if (known & RADIOTAP_VHT_KNOWN_BANDWIDTH) {
++				if (bw >= RADIOTAP_VHT_BW_160_THRESH)
++					params->vht_bw = 3;
++				else if (bw >= RADIOTAP_VHT_BW_80_THRESH)
++					params->vht_bw = 2;
++				else if (bw >= RADIOTAP_VHT_BW_20_THRESH)
++					params->vht_bw = 1;
++				else
++					params->vht_bw = 0;
++			}
++			break;
++		}
++
++		case RADIOTAP_F_HE:
++		{
++			/*
++			 * HE field: 12 bytes = 6×u16 (IEEE 802.11ax §9.14.3.14)
++			 *   data1 [1:0]: known bits
++			 *   data3 [5:4]: data MCS (bits[3:0]) + LDPC (bit[5])
++			 *   data5 [9:8]: BW/RU alloc (bits[3:0]) + GI (bits[6:5])
++			 *   data6 [11:10]: NSTS (bits[3:0])
++			 */
++			uint16_t data1 = get_unaligned_le16(ptr);
++			uint16_t data3 = get_unaligned_le16(ptr + 4);
++			uint16_t data5 = get_unaligned_le16(ptr + 8);
++			uint16_t data6 = get_unaligned_le16(ptr + 10);
++			uint8_t  bw_ru = data5 & RADIOTAP_HE_DATA5_BW_RU_ALLOC_MASK;
++			uint8_t  he_mcs = data3 & RADIOTAP_HE_DATA3_DATA_MCS;
++			uint8_t  he_nss = (data6 & RADIOTAP_HE_DATA6_NSTS_MASK);
++
++			if (he_nss == 0)
++				he_nss = 1;
++
++			if (data1 & RADIOTAP_HE_DATA1_DATA_MCS_KNOWN) {
++				params->he_mcs = he_mcs;
++				params->he_nss = he_nss;
++				params->has_he = true;
++			}
++
++			if (data1 & RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN)
++				params->he_bw = (bw_ru >= 4) ? 0 : bw_ru;
++
++			if (data1 & RADIOTAP_HE_DATA1_CODING_KNOWN)
++				params->he_ldpc = !!(data3 & RADIOTAP_HE_DATA3_CODING);
++
++			params->he_short_gi =
++				((data5 & RADIOTAP_HE_DATA5_GI_MASK) ==
++				 RADIOTAP_HE_DATA5_GI_0_8_US);
++			break;
++		}
++
++		default:
++			/* Field we don't need — just skip past it */
++			break;
++		}
++
++		/* Advance pointer past this field */
++		ptr += fi->size;
++	}
++
++	return true;
++}
++
+ /**
+  * hdd_is_monitor_tx_dev() - detect monitor-mode netdev tx context
+  * @adapter: HDD adapter bound to @dev
+@@ -937,7 +1392,9 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ {
+ 	static bool mon_tx_path_logged;
+ 	static bool mon_ctx_force_logged;
++	static bool mon_rtap_params_logged;
+ 	struct ieee80211_radiotap_header *rthdr;
++	struct hdd_radiotap_tx_params rtap_params;
+ 	struct inject_frame_req *req;
+ 	uint8_t *frame_data;
+ 	uint16_t rtap_len;
+@@ -945,6 +1402,7 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	uint64_t now;
+ 	QDF_STATUS status;
+ 	bool has_radiotap = false;
++	bool rtap_parsed = false;
+ 
+ 	if (!adapter || !adapter->injection_ctx || !skb)
+ 		goto drop;
+@@ -974,15 +1432,24 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	 * Prefer radiotap format (normal for monitor TX), but allow fallback to
+ 	 * raw 802.11 if userspace or netdev path does not prepend radiotap.
+ 	 */
+-	if (skb->len >= sizeof(*rthdr)) {
++	if (skb->len >= sizeof(struct ieee80211_radiotap_header)) {
+ 		rthdr = (struct ieee80211_radiotap_header *)skb->data;
+ 		if (rthdr->it_version == 0) {
+ 			rtap_len = ieee80211_get_radiotap_len(skb->data);
+-			if (rtap_len >= sizeof(*rthdr) && rtap_len < skb->len)
++			if (rtap_len >= sizeof(struct ieee80211_radiotap_header) && rtap_len < skb->len)
+ 				has_radiotap = true;
+ 		}
+ 	}
+ 
++	/*
++	 * Extract TX parameters (rate, channel, flags) from the radiotap
++	 * header before stripping it.  Tools like aireplay-ng, mdk4, and
++	 * scapy encode desired TX rate and NO_ACK hints here.
++	 */
++	memset(&rtap_params, 0, sizeof(rtap_params));
++		rtap_parsed = hdd_parse_radiotap_tx_params(skb->data,
++							   skb->len,
++							   &rtap_params);
+ 	if (has_radiotap) {
+ 		frame_data = skb->data + rtap_len;
+ 		frame_len = skb->len - rtap_len;
+@@ -1011,6 +1478,40 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	if (!req)
+ 		goto drop;
+ 
++	if (rtap_parsed && !mon_rtap_params_logged &&
++	    (rtap_params.has_rate || rtap_params.has_noack ||
++	     rtap_params.has_channel || rtap_params.has_mcs ||
++	     rtap_params.has_vht || rtap_params.has_he)) {
++		if (rtap_params.has_he)
++			hdd_warn("monitor tx: radiotap HE params: mcs=%u nss=%u bw=%u sgi=%u ldpc=%u channel=%u MHz noack=%u",
++				 rtap_params.he_mcs, rtap_params.he_nss,
++				 rtap_params.he_bw,
++				 rtap_params.he_short_gi ? 1 : 0,
++				 rtap_params.he_ldpc ? 1 : 0,
++				 rtap_params.channel_freq,
++				 rtap_params.has_noack ? 1 : 0);
++		else if (rtap_params.has_vht)
++			hdd_warn("monitor tx: radiotap VHT params: mcs=%u nss=%u bw=%u sgi=%u ldpc=%u stbc=%u channel=%u MHz noack=%u",
++				 rtap_params.vht_mcs, rtap_params.vht_nss,
++				 rtap_params.vht_bw,
++				 rtap_params.vht_short_gi ? 1 : 0,
++				 rtap_params.vht_ldpc ? 1 : 0,
++				 rtap_params.vht_stbc,
++				 rtap_params.channel_freq,
++				 rtap_params.has_noack ? 1 : 0);
++		else
++			hdd_warn("monitor tx: radiotap TX params: rate=%u (100kbps) mcs=%u (has=%u bw=%u sgi=%u) channel=%u MHz noack=%u flags=0x%x",
++				 rtap_params.rate_100kbps,
++				 rtap_params.mcs_index,
++				 rtap_params.has_mcs ? 1 : 0,
++				 rtap_params.mcs_bw,
++				 rtap_params.mcs_short_gi ? 1 : 0,
++				 rtap_params.channel_freq,
++				 rtap_params.has_noack ? 1 : 0,
++				 rtap_params.tx_flags);
++		mon_rtap_params_logged = true;
++	}
++
+ 	req->frame_data = qdf_mem_malloc(frame_len);
+ 	if (!req->frame_data) {
+ 		qdf_mem_free(req);
+@@ -1022,9 +1523,7 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	now = qdf_get_log_timestamp();
+ 
+ 	req->frame_len = frame_len;
+-	req->tx_flags = 0;
+ 	req->retry_count = 0;
+-	req->tx_rate = 0;
+ 	req->timestamp = now;
+ 	req->session_id = (uint32_t)now;
+ 	req->submit_time = now;
+@@ -1032,6 +1531,70 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ 	req->process_time = 0;
+ 	req->complete_time = 0;
+ 
++	/*
++	 * Populate TX parameters from radiotap extraction.
++	 * If no radiotap was present or parsing failed, these default to 0
++	 * which lets the firmware choose its own defaults.
++	 *
++	 * MCS encoding in tx_rate:
++	 *   If has_mcs is set, tx_rate is encoded as:
++	 *     bits [7:0]   = MCS index (0-76)
++	 *     bits [9:8]   = BW (0=20MHz, 1=40MHz)
++	 *     bit  [10]    = Short GI
++	 *     bit  [11]    = Greenfield
++	 *     bit  [12]    = LDPC
++	 *     bits [14:13] = STBC streams
++	 *     bit  [15]    = MCS indicator flag (always 1 for MCS)
++	 *   The WMA rate mapper checks bit 15 to distinguish MCS from legacy.
++	 */
++	#define HDD_INJECT_RATE_MCS_FLAG    BIT(15)
++	#define HDD_INJECT_RATE_VHT_FLAG    BIT(16)  /* Set alongside MCS_FLAG for VHT */
++	#define HDD_INJECT_RATE_HE_FLAG     BIT(20)  /* Set alongside MCS_FLAG for HE (802.11ax) */
++	#define HDD_INJECT_RATE_MCS_MASK    0x007F   /* HT: MCS index 0-76; VHT/HE: bits[3:0] */
++	#define HDD_INJECT_RATE_BW_SHIFT    8        /* bits[9:8]: 0=20, 1=40, 2=80, 3=160 MHz */
++	#define HDD_INJECT_RATE_SGI_BIT     BIT(10)
++	#define HDD_INJECT_RATE_GF_BIT      BIT(11)  /* HT Greenfield (unused for VHT/HE) */
++	#define HDD_INJECT_RATE_LDPC_BIT    BIT(12)
++	#define HDD_INJECT_RATE_STBC_SHIFT  13       /* bits[14:13]: STBC streams */
++	#define HDD_INJECT_RATE_NSS_SHIFT   17       /* bits[19:17]: NSS-1 for VHT/HE */
++
++	if (rtap_parsed) {
++		req->tx_flags = rtap_params.tx_flags;
++		if (rtap_params.has_he) {
++			req->tx_rate = HDD_INJECT_RATE_MCS_FLAG |
++				       HDD_INJECT_RATE_HE_FLAG |
++				       (rtap_params.he_mcs & 0x0F) |
++				       ((uint32_t)rtap_params.he_bw << HDD_INJECT_RATE_BW_SHIFT) |
++				       (rtap_params.he_short_gi ? HDD_INJECT_RATE_SGI_BIT : 0) |
++				       (rtap_params.he_ldpc ? HDD_INJECT_RATE_LDPC_BIT : 0) |
++				       ((uint32_t)(rtap_params.he_nss - 1) << HDD_INJECT_RATE_NSS_SHIFT);
++		} else if (rtap_params.has_vht) {
++			/* Encode VHT params: MCS_FLAG + VHT_FLAG both set */
++			req->tx_rate = HDD_INJECT_RATE_MCS_FLAG |
++				       HDD_INJECT_RATE_VHT_FLAG |
++				       (rtap_params.vht_mcs & 0x0F) |
++				       ((uint32_t)rtap_params.vht_bw << HDD_INJECT_RATE_BW_SHIFT) |
++				       (rtap_params.vht_short_gi ? HDD_INJECT_RATE_SGI_BIT : 0) |
++				       (rtap_params.vht_ldpc ? HDD_INJECT_RATE_LDPC_BIT : 0) |
++				       ((uint32_t)rtap_params.vht_stbc << HDD_INJECT_RATE_STBC_SHIFT) |
++				       ((uint32_t)(rtap_params.vht_nss - 1) << HDD_INJECT_RATE_NSS_SHIFT);
++		} else if (rtap_params.has_mcs) {
++			/* Encode HT MCS params into tx_rate with flag bit */
++			req->tx_rate = HDD_INJECT_RATE_MCS_FLAG |
++				       (rtap_params.mcs_index & HDD_INJECT_RATE_MCS_MASK) |
++				       ((uint32_t)rtap_params.mcs_bw << HDD_INJECT_RATE_BW_SHIFT) |
++				       (rtap_params.mcs_short_gi ? HDD_INJECT_RATE_SGI_BIT : 0) |
++				       (rtap_params.mcs_greenfield ? HDD_INJECT_RATE_GF_BIT : 0) |
++				       (rtap_params.mcs_ldpc ? HDD_INJECT_RATE_LDPC_BIT : 0) |
++				       ((uint32_t)rtap_params.mcs_stbc << HDD_INJECT_RATE_STBC_SHIFT);
++		} else {
++			req->tx_rate = rtap_params.rate_100kbps;
++		}
++	} else {
++		req->tx_flags = 0;
++		req->tx_rate = 0;
++	}
++
+ 	status = hdd_process_frame_injection(adapter, req);
+ 	if (QDF_IS_STATUS_ERROR(status)) {
+ 		hdd_err_rl("monitor tx: frame injection enqueue failed: %d", status);
+@@ -1042,7 +1605,7 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
+ drop:
+ 	kfree_skb(skb);
+ }
+-#endif
++#endif // FEATURE_FRAME_INJECTION_SUPPORT
+ 
+ #ifdef HANDLE_BROADCAST_EAPOL_TX_FRAME
+ /**
+diff --git a/drivers/staging/qcacld-3.0/core/wma/inc/wma_frame_inject.h b/drivers/staging/qcacld-3.0/core/wma/inc/wma_frame_inject.h
+old mode 100644
+new mode 100755
+index 892ea049a136..f92c2ada065b
+--- a/drivers/staging/qcacld-3.0/core/wma/inc/wma_frame_inject.h
++++ b/drivers/staging/qcacld-3.0/core/wma/inc/wma_frame_inject.h
+@@ -153,6 +153,25 @@ QDF_STATUS wma_deinit_injection_queue(tp_wma_handle wma_handle);
+  */
+ void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle);
+ 
++/**
++ * wma_injection_notify_channel_change() - Re-tune injection helper vdev
++ * @wma_handle: WMA handle
++ * @mon_vdev_id: Monitor vdev ID whose channel changed
++ * @new_freq: New channel frequency in MHz
++ *
++ * Proactively re-tunes the hidden injection TX helper vdev to @new_freq
++ * when the monitor channel changes.  Without this, the helper vdev stays
++ * on the old channel until the next injection attempt detects the mismatch,
++ * creating a brief window where injected frames go out on the wrong
++ * frequency or are dropped by firmware.
++ *
++ * Call this from the cfg80211 set_monitor_channel path after the channel
++ * change has been committed to firmware.
++ */
++void wma_injection_notify_channel_change(tp_wma_handle wma_handle,
++					 uint8_t mon_vdev_id,
++					 uint32_t new_freq);
++
+ /**
+  * wma_queue_injection_frame() - Queue frame for injection
+  * @wma_handle: WMA handle
+@@ -341,6 +360,12 @@ static inline void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
+ {
+ }
+ 
++static inline void wma_injection_notify_channel_change(tp_wma_handle wma_handle,
++						       uint8_t mon_vdev_id,
++						       uint32_t new_freq)
++{
++}
++
+ static inline QDF_STATUS wma_queue_injection_frame(tp_wma_handle wma_handle,
+ 						    struct inject_frame_req *req,
+ 						    uint8_t vdev_id)
+diff --git a/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c b/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c
+old mode 100644
+new mode 100755
+index e59bb7bcdacb..1344dc96fccd
+--- a/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c
++++ b/drivers/staging/qcacld-3.0/core/wma/src/wma_frame_inject.c
+@@ -24,6 +24,7 @@
+  * injected 802.11 frames through the firmware interface.
+  */
+ 
++#include <linux/version.h>
+ #include "wma.h"
+ #include "wma_frame_inject.h"
+ #include "wlan_hdd_frame_inject.h"
+@@ -336,7 +337,8 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
+ 		for (i = fw_max_vid; i >= 0; i--) {
+ 			if ((uint8_t)i == mon_vdev_id)
+ 				continue;
+-			if (!wma->interfaces[i].vdev) {
++			if (!wma->interfaces[i].vdev &&
++			    !wma->interfaces[i].vdev_active) {
+ 				vid = (uint8_t)i;
+ 				found = true;
+ 				break;
+@@ -352,7 +354,7 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
+ 	wma_injection_reset_session_state();
+ 
+ 	if (!wma->interfaces[mon_vdev_id].vdev) {
+-        	wma_err("Injection: monitor vdev invalid");
++			wma_err("Injection: monitor vdev invalid");
+ 	        return QDF_STATUS_E_FAILURE;
+ 	}
+ 
+@@ -442,6 +444,7 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
+ 	g_inj_tx_vdev.monitor_vdev_id  = mon_vdev_id;
+ 	g_inj_tx_vdev.chanfreq         = chanfreq;
+ 	qdf_mem_copy(g_inj_tx_vdev.mac_addr, inj_mac, QDF_MAC_ADDR_SIZE);
++	wma->interfaces[vid].vdev_active = true;
+ 
+ 	wma_info("Injection TX helper vdev created: vdev_id=%u mac=%pM freq=%u type=STA",
+ 		 vid, inj_mac, chanfreq);
+@@ -472,11 +475,27 @@ static void wma_injection_destroy_tx_vdev(tp_wma_handle wma)
+ 	 * subsequent VDEV_CREATE for the same slot races with the
+ 	 * pending DELETE and firmware asserts.
+ 	 */
++	if (!wma->wmi_handle) {
++		wma_warn("WMI down, clearing injection vdev state only");
++		qdf_mem_zero(&g_inj_tx_vdev, sizeof(g_inj_tx_vdev));
++		return;
++	}
+ 
+ 	/* 1. PEER_DELETE */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
++	{
++		struct peer_delete_cmd_params del_param = {0};
++
++		del_param.vdev_id = g_inj_tx_vdev.vdev_id;
++		wmi_unified_peer_delete_send(wma->wmi_handle,
++					     g_inj_tx_vdev.mac_addr,
++					     &del_param);
++	}
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+ 	wmi_unified_peer_delete_send(wma->wmi_handle,
+ 				     g_inj_tx_vdev.mac_addr,
+ 				     g_inj_tx_vdev.vdev_id);
++#endif
+ 	qdf_sleep(10);
+ 
+ 	/* 2. VDEV_STOP (we did VDEV_START during create) */
+@@ -491,12 +510,14 @@ static void wma_injection_destroy_tx_vdev(tp_wma_handle wma)
+ 
+ 	wma_info("Injection TX helper vdev destroyed: vdev_id=%u",
+ 		 g_inj_tx_vdev.vdev_id);
++
++	wma->interfaces[g_inj_tx_vdev.vdev_id].vdev_active = false;
+ 	qdf_mem_zero(&g_inj_tx_vdev, sizeof(g_inj_tx_vdev));
+ }
+ 
+ /**
+  * wma_injection_pre_stop_cleanup() - Destroy injection helper vdev before
+- *                                     monitor mode stop
++ * monitor mode stop
+  * @wma_handle: WMA handle
+  *
+  * Must be called while WMI is still alive, BEFORE the driver sends
+@@ -505,7 +526,7 @@ static void wma_injection_destroy_tx_vdev(tp_wma_handle wma)
+  * present when the monitor vdev is torn down.
+  *
+  * Proper teardown order (reverse of create):
+- *   PEER_DELETE → VDEV_STOP → VDEV_DELETE
++ * PEER_DELETE → VDEV_STOP → VDEV_DELETE
+  * with msleep() gaps so the firmware can process each command.
+  */
+ void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
+@@ -525,13 +546,32 @@ void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
+ 		return;
+ 	}
+ 
++	/* Optional safety check */
++	if (g_inj_tx_vdev.vdev_id >= wma_handle->max_bssid) {
++		wma_err("Invalid vdev_id=%u in injection cleanup",
++			g_inj_tx_vdev.vdev_id);
++		qdf_mem_zero(&g_inj_tx_vdev, sizeof(g_inj_tx_vdev));
++		return;
++	}
++
+ 	wma_info("Pre-stop cleanup: destroying injection helper vdev_id=%u",
+ 		 g_inj_tx_vdev.vdev_id);
+ 
+ 	/* 1. PEER_DELETE */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
++	{
++		struct peer_delete_cmd_params del_param = {0};
++
++		del_param.vdev_id = g_inj_tx_vdev.vdev_id;
++		wmi_unified_peer_delete_send(wma_handle->wmi_handle,
++					     g_inj_tx_vdev.mac_addr,
++					     &del_param);
++	}
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+ 	wmi_unified_peer_delete_send(wma_handle->wmi_handle,
+ 				     g_inj_tx_vdev.mac_addr,
+ 				     g_inj_tx_vdev.vdev_id);
++#endif
+ 	qdf_sleep(10);
+ 
+ 	/* 2. VDEV_STOP (we did VDEV_START during create) */
+@@ -546,9 +586,77 @@ void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
+ 
+ 	wma_info("Pre-stop cleanup: injection helper vdev destroyed: vdev_id=%u",
+ 		 g_inj_tx_vdev.vdev_id);
++
++	wma_handle->interfaces[g_inj_tx_vdev.vdev_id].vdev_active = false;
+ 	qdf_mem_zero(&g_inj_tx_vdev, sizeof(g_inj_tx_vdev));
+ }
+ 
++/**
++ * wma_injection_notify_channel_change() - Re-tune injection helper vdev
++ * @wma_handle: WMA handle
++ * @mon_vdev_id: Monitor vdev ID whose channel changed
++ * @new_freq: New channel frequency in MHz
++ *
++ * Proactively re-tunes the hidden injection TX helper vdev to @new_freq.
++ * If no helper vdev exists yet this is a no-op (it will be created lazily
++ * on the first injection attempt at the new frequency).
++ */
++void wma_injection_notify_channel_change(tp_wma_handle wma_handle,
++					 uint8_t mon_vdev_id,
++					 uint32_t new_freq)
++{
++	struct wma_injection_queue_ctx *ctx = &g_wma_injection_ctx;
++	QDF_STATUS status;
++	int drain_wait_ms = 0;
++
++	if (!wma_handle || !new_freq)
++		return;
++
++	/*
++	 * If no helper vdev exists, nothing to re-tune.  It will be
++	 * created at the correct frequency on the next injection attempt.
++	 */
++	if (!g_inj_tx_vdev.created)
++		return;
++
++	/* Already on the right channel — nothing to do */
++	if (g_inj_tx_vdev.chanfreq == new_freq)
++		return;
++
++	wma_info("Injection channel change: re-tuning helper vdev %u from %u to %u MHz (monitor vdev %u)",
++		 g_inj_tx_vdev.vdev_id, g_inj_tx_vdev.chanfreq,
++		 new_freq, mon_vdev_id);
++
++	/*
++	 * Drain in-flight frames before switching channel.
++	 * Frames submitted to FW are DMA-mapped on the old channel;
++	 * wait for completions to arrive before retuning to avoid
++	 * transmitting on the wrong frequency.
++	 */
++	if (ctx->is_initialized) {
++		while (qdf_atomic_read(&ctx->inflight_count) > 0 &&
++		       drain_wait_ms < 100) {
++			qdf_mdelay(5);
++			drain_wait_ms += 5;
++		}
++		if (qdf_atomic_read(&ctx->inflight_count) > 0)
++			wma_warn("Channel change with %d in-flight injection frames",
++				 qdf_atomic_read(&ctx->inflight_count));
++	}
++
++	/*
++	 * wma_injection_ensure_tx_vdev handles the channel change:
++	 * if the helper vdev exists but is on a different frequency,
++	 * it issues a VDEV_START restart to re-tune the synthesizer.
++	 * If that fails it tears down and recreates the vdev.
++	 */
++	status = wma_injection_ensure_tx_vdev(wma_handle, mon_vdev_id,
++					      new_freq);
++	if (QDF_IS_STATUS_ERROR(status))
++		wma_err("Failed to re-tune injection helper vdev to %u MHz: %d",
++			new_freq, status);
++}
++
+ static void
+ wma_injection_debug_cache_update(uint32_t desc_id,
+ 				 struct inject_frame_req *req,
+@@ -733,13 +841,6 @@ static bool wma_check_traffic_coordination(tp_wma_handle wma_handle, uint8_t vde
+ 		return false;
+ 	}
+ 
+-	/* Check if there's high priority management traffic pending */
+-	if (iface->roaming_in_progress) {
+-		wma_debug("High priority operation in progress on vdev %u, deferring injection",
+-			  vdev_id);
+-		return false;
+-	}
+-
+ 	/* Check system-wide resource constraints */
+ 	if (wma_handle->wmi_ready == false) {
+ 		wma_debug("WMI not ready, deferring injection");
+@@ -938,7 +1039,7 @@ static void wma_process_injection_queue_work(void *arg)
+ 	if (queue_has_frames) {
+ 		/* Apply backpressure if queue is congested */
+ 		backpressure_delay = wma_apply_injection_backpressure(ctx);
+-		
++
+ 		if (backpressure_delay > 0) {
+ 			qdf_delayed_work_start(&ctx->delayed_work, backpressure_delay);
+ 		} else {
+@@ -1118,7 +1219,7 @@ QDF_STATUS wma_deinit_injection_queue(tp_wma_handle wma_handle)
+ 	/* Cancel any pending work */
+ 	qdf_cancel_work(&ctx->queue_work);
+ 	qdf_flush_work(&ctx->queue_work);
+-	
++
+ 	/* Cancel and destroy delayed work */
+ 	qdf_delayed_work_stop_sync(&ctx->delayed_work);
+ 	qdf_delayed_work_destroy(&ctx->delayed_work);
+@@ -1540,11 +1641,16 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
+ 	mgmt_params.frm_len = req->frame_len;
+ 	mgmt_params.vdev_id = vdev_id;
+ 	/*
+-	 * Use ACK-completion tx type for injection consistently. Several
+-	 * firmware builds are stricter with probe-request tx_type handling and
+-	 * are less likely to discard when sent with ACK-completion semantics.
++	 * Default to ACK-completion tx type.  If the injection request has
++	 * the NO_ACK flag set (e.g. from radiotap TX_FLAGS), switch to the
++	 * no-ack variant so firmware does not wait for an ACK and the frame
++	 * is fire-and-forget — required for deauth/disassoc injection and
++	 * broadcast frames used by tools like aireplay-ng and mdk4.
+ 	 */
+-	mgmt_params.tx_type = GENERIC_NODOWLOAD_ACK_COMP_INDEX;
++	if (req->tx_flags & HDD_FRAME_INJECT_TX_NO_ACK)
++		mgmt_params.tx_type = GENERIC_NODOWNLD_NOACK_COMP_INDEX;
++	else
++		mgmt_params.tx_type = GENERIC_NODOWLOAD_ACK_COMP_INDEX;
+ 	/*
+ 	 * Align with regular host management TX behavior:
+ 	 * probe request uses chanfreq=0 while action/auth/probe-rsp can carry
+@@ -1566,10 +1672,186 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
+ 	wma_injection_debug_cache_update(mgmt_params.desc_id, req, fc_type,
+ 					 fc_subtype, mgmt_params.chanfreq);
+ 
+-	/* Set transmission rate if specified in injection request */
++	/*
++	 * Map injection TX rate to WMI tx_send_params.
++	 *
++	 * tx_rate encoding (set by radiotap parser in wlan_hdd_tx_rx.c):
++	 *
++	 * Legacy rates (bit 15 clear):
++	 *   Value is in 100kbps units (radiotap rate × 5).
++	 *   Mapped to WMI mcs_mask bitmask of allowed legacy rates.
++	 *
++	 * HT MCS rates (bit 15 set, bit 16 clear):
++	 *   bits [6:0]   = MCS index (0-76)
++	 *   bits [9:8]   = BW (0=20MHz, 1=40MHz)
++	 *   bit  [10]    = Short GI
++	 *   bit  [11]    = Greenfield
++	 *   bit  [12]    = LDPC
++	 *   bits [14:13] = STBC streams
++	 *   bit  [15]    = MCS indicator flag
++	 *
++	 * VHT MCS rates (bit 15 set, bit 16 set, bit 20 clear):
++	 *   bits [3:0]   = VHT MCS index (0-9)
++	 *   bits [9:8]   = BW (0=20MHz, 1=40MHz, 2=80MHz, 3=160MHz)
++	 *   bit  [10]    = Short GI
++	 *   bit  [12]    = LDPC
++	 *   bits [14:13] = STBC streams
++	 *   bit  [15]    = MCS indicator flag
++	 *   bit  [16]    = VHT indicator flag
++	 *   bits [19:17] = NSS-1 (0=NSS1 .. 7=NSS8)
++	 *
++	 * HE (802.11ax) rates (bit 15 set, bit 20 set):
++	 *   bits [3:0]   = HE MCS index (0-11)
++	 *   bits [9:8]   = BW (0=20MHz, 1=40MHz, 2=80MHz, 3=160MHz)
++	 *   bit  [10]    = Short GI (0.8µs)
++	 *   bit  [12]    = LDPC
++	 *   bit  [15]    = MCS indicator flag
++	 *   bit  [20]    = HE indicator flag
++	 *   bits [19:17] = NSS-1 (0=NSS1 .. 7=NSS8)
++	 */
++	#define HDD_INJECT_RATE_MCS_FLAG    BIT(15)
++	#define HDD_INJECT_RATE_VHT_FLAG    BIT(16)
++	#define HDD_INJECT_RATE_HE_FLAG     BIT(20)
++
+ 	if (req->tx_rate != 0) {
+-		mgmt_params.tx_param.mcs_mask = req->tx_rate;
+-		mgmt_params.tx_params_valid = true;
++		if (req->tx_rate & HDD_INJECT_RATE_MCS_FLAG) {
++			bool sgi  = !!(req->tx_rate & BIT(10));
++			bool ldpc = !!(req->tx_rate & BIT(12));
++			uint8_t stbc = (req->tx_rate >> 13) & 0x03;
++			uint8_t bw   = (req->tx_rate >> 8) & 0x03;
++
++			if (req->tx_rate & HDD_INJECT_RATE_HE_FLAG) {
++				/*
++				 * 802.11ax HE rate from radiotap field 23.
++				 */
++				uint8_t he_mcs = req->tx_rate & 0x0F;
++				uint8_t nss = ((req->tx_rate >> 17) & 0x07) + 1;
++
++				mgmt_params.tx_param.mcs_mask =
++					BIT(he_mcs < 12 ? he_mcs : 11);
++				mgmt_params.tx_param.preamble_type = BIT(4); /* HE */
++				mgmt_params.tx_param.nss_mask = BIT(nss - 1);
++				mgmt_params.tx_param.bw_mask =
++					(bw == 3) ? BIT(5) :
++					(bw == 2) ? BIT(4) :
++					(bw == 1) ? BIT(3) : BIT(2);
++				mgmt_params.tx_param.retry_limit = 4;
++				mgmt_params.tx_params_valid = true;
++
++				wma_debug("Injection HE rate: mcs=%u bw=%u sgi=%u ldpc=%u nss=%u",
++					  he_mcs, bw, sgi ? 1 : 0, ldpc ? 1 : 0, nss);
++			} else if (req->tx_rate & HDD_INJECT_RATE_VHT_FLAG) {
++				/*
++				 * 802.11ac VHT rate from radiotap field 21.
++				 */
++				uint8_t vht_mcs = req->tx_rate & 0x0F;
++				uint8_t nss = ((req->tx_rate >> 17) & 0x07) + 1;
++
++				mgmt_params.tx_param.mcs_mask =
++					BIT(vht_mcs < 10 ? vht_mcs : 9);
++				mgmt_params.tx_param.preamble_type = BIT(3); /* VHT */
++				mgmt_params.tx_param.nss_mask = BIT(nss - 1);
++				mgmt_params.tx_param.bw_mask =
++					(bw == 3) ? BIT(5) /* 160MHz */ :
++					(bw == 2) ? BIT(4) /* 80MHz */  :
++					(bw == 1) ? BIT(3) /* 40MHz */  : BIT(2) /* 20MHz */;
++				mgmt_params.tx_param.retry_limit = 4;
++				mgmt_params.tx_params_valid = true;
++
++				wma_debug("Injection VHT rate: mcs=%u bw=%u sgi=%u ldpc=%u stbc=%u nss=%u nss_mask=0x%x",
++					  vht_mcs, bw, sgi ? 1 : 0, ldpc ? 1 : 0,
++					  stbc, nss, mgmt_params.tx_param.nss_mask);
++			} else {
++				/*
++				 * 802.11n HT MCS rate from radiotap field 19.
++				 *
++				 * WMI mcs_mask for HT: each bit corresponds to an
++				 * MCS index (0-11 in the 12-bit field).  For MCS
++				 * indices > 11, firmware uses the mcs_mask as a
++				 * direct index hint.  Set the single bit for the
++				 * requested MCS index (clamped to the 12-bit field).
++				 */
++				uint8_t mcs_idx = req->tx_rate & 0x7F;
++
++				if (mcs_idx < 12)
++					mgmt_params.tx_param.mcs_mask = BIT(mcs_idx);
++				else
++					mgmt_params.tx_param.mcs_mask = BIT(7); /* MCS7 fallback */
++
++				mgmt_params.tx_param.preamble_type = BIT(2); /* HT */
++				mgmt_params.tx_param.nss_mask =
++					BIT(mcs_idx / 8); /* NSS derived from MCS index */
++				mgmt_params.tx_param.bw_mask =
++					(bw == 1) ? BIT(3) /* 40MHz */ : BIT(2) /* 20MHz */;
++				mgmt_params.tx_param.retry_limit = 4;
++				mgmt_params.tx_params_valid = true;
++
++				wma_debug("Injection HT MCS rate: idx=%u bw=%u sgi=%u ldpc=%u stbc=%u nss_mask=0x%x",
++					  mcs_idx, bw, sgi ? 1 : 0, ldpc ? 1 : 0,
++					  stbc, mgmt_params.tx_param.nss_mask);
++			}
++
++			/*
++			 * SGI and STBC have no per-frame field in tx_send_params.
++			 * Apply them as vdev params on the helper vdev so the
++			 * firmware rate-code engine can honor them.
++			 */
++			if (g_inj_tx_vdev.created) {
++				if (sgi)
++					wma_vdev_set_param(wma_handle->wmi_handle,
++							   g_inj_tx_vdev.vdev_id,
++							   WMI_VDEV_PARAM_SGI, 1);
++				if (stbc)
++					wma_vdev_set_param(wma_handle->wmi_handle,
++							   g_inj_tx_vdev.vdev_id,
++							   WMI_VDEV_PARAM_TX_STBC,
++							   stbc);
++			}
++		} else {
++			/* Legacy rate in 100kbps units */
++			static const struct {
++				uint16_t rate_100kbps;
++				uint16_t mcs_bit;
++				uint8_t  preamble; /* 0=OFDM, 1=CCK */
++			} rate_table[] = {
++				{  10, BIT(0),  1 },  /* CCK 1 Mbps */
++				{  20, BIT(1),  1 },  /* CCK 2 Mbps */
++				{  55, BIT(2),  1 },  /* CCK 5.5 Mbps */
++				{ 110, BIT(3),  1 },  /* CCK 11 Mbps */
++				{  60, BIT(4),  0 },  /* OFDM 6 Mbps */
++				{  90, BIT(5),  0 },  /* OFDM 9 Mbps */
++				{ 120, BIT(6),  0 },  /* OFDM 12 Mbps */
++				{ 180, BIT(7),  0 },  /* OFDM 18 Mbps */
++				{ 240, BIT(8),  0 },  /* OFDM 24 Mbps */
++				{ 360, BIT(9),  0 },  /* OFDM 36 Mbps */
++				{ 480, BIT(10), 0 },  /* OFDM 48 Mbps */
++				{ 540, BIT(11), 0 },  /* OFDM 54 Mbps */
++			};
++			int i;
++			bool matched = false;
++
++			for (i = 0; i < ARRAY_SIZE(rate_table); i++) {
++				if (req->tx_rate == rate_table[i].rate_100kbps) {
++					mgmt_params.tx_param.mcs_mask =
++						rate_table[i].mcs_bit;
++					mgmt_params.tx_param.preamble_type =
++						rate_table[i].preamble ?
++						BIT(1) /* CCK */ : BIT(0) /* OFDM */;
++					mgmt_params.tx_param.nss_mask = BIT(0);
++					mgmt_params.tx_param.bw_mask = BIT(2); /* 20MHz */
++					mgmt_params.tx_params_valid = true;
++					matched = true;
++					break;
++				}
++			}
++
++			if (!matched) {
++				/* Unknown rate — use 6 Mbps OFDM as safe default */
++				mgmt_params.use_6mbps = 1;
++				wma_debug("Injection: unmapped rate %u (100kbps), falling back to 6Mbps",
++					  req->tx_rate);
++			}
++		}
+ 	}
+ 
+ 	if (!inject_tx_cfg_logged) {
+@@ -1694,7 +1976,7 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
+ 		if (ret == -EINVAL)
+ 			wma_warn("Legacy management TX got -EINVAL (desc alloc or tx pool reject)");
+ 		status = qdf_status_from_os_return(ret);
+-		
++
+ 		if (QDF_IS_STATUS_ERROR(status)) {
+ 			wma_err("Legacy management TX failed: %d (wmi_attempted=%u)",
+ 				status, wmi_tx_attempted ? 1 : 0);
+@@ -1823,7 +2105,7 @@ QDF_STATUS wma_handle_injection_fw_response(tp_wma_handle wma_handle,
+ 	/* Check if this is an error response */
+ 	if (status != 0) {
+ 		WMA_LOGW("Firmware injection failed: desc_id=%u, status=0x%x", desc_id, status);
+-		
++
+ 		/* Handle the firmware error */
+ 		qdf_status = wma_handle_firmware_injection_error(wma_handle, status, 0, NULL);
+ 		if (QDF_IS_STATUS_ERROR(qdf_status) && qdf_status != QDF_STATUS_E_PENDING) {
+@@ -1835,7 +2117,6 @@ QDF_STATUS wma_handle_injection_fw_response(tp_wma_handle wma_handle,
+ 	}
+ 
+ 	/* Update statistics would go here in a full implementation */
+-	
+ 	return qdf_status;
+ }
+ 
+@@ -2030,7 +2311,7 @@ QDF_STATUS wma_handle_firmware_injection_error(tp_wma_handle wma_handle,
+ 		if (req->retry_count < 3) { /* Maximum 3 retries */
+ 			wma_info("Retrying injection after %u ms delay (attempt %u)",
+ 				 retry_delay_ms, req->retry_count + 1);
+-			
++
+ 			/* Schedule retry with delay */
+ 			status = wma_retry_injection_frame(wma_handle, req, vdev_id, error_type);
+ 			if (QDF_IS_STATUS_SUCCESS(status)) {
+-- 
+2.51.0
+

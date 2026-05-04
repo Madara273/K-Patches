@@ -1,0 +1,39 @@
+From d868303d2d73cce5efeee304cdacb9ea504892b6 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sun, 8 Mar 2026 19:02:19 +0000
+Subject: [PATCH 08/15] staging: qcacld-3.0: move the radio header above,
+ outside the condition.
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+index bc644ad27bc7..108b86d7e8a2 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_tx_rx.c
+@@ -37,6 +37,8 @@
+ #include <cds_sched.h>
+ #include <cds_utils.h>
+ 
++#include <net/ieee80211_radiotap.h>
++
+ #include <wlan_hdd_p2p.h>
+ #include <linux/wireless.h>
+ #include <net/cfg80211.h>
+@@ -63,10 +65,8 @@
+ 
+ #include "wlan_hdd_nud_tracking.h"
+ #include "dp_txrx.h"
+-#if defined(WLAN_SUPPORT_RX_FISA)
++#ifdef WLAN_SUPPORT_RX_FISA
+ #include "dp_fisa_rx.h"
+-#else
+-#include <net/ieee80211_radiotap.h>
+ #endif
+ #include <ol_defines.h>
+ #include "cfg_ucfg_api.h"
+-- 
+2.51.0
+

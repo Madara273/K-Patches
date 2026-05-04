@@ -1,0 +1,130 @@
+From e25a71306ea13a6dac2c8a21c861b1944ad8b6df Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Thu, 7 Aug 2025 10:12:24 +0000
+Subject: [PATCH 02/15] qcacld-3.0: Skip HW mode change for same channel in
+ monitor mode
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ .../policy_mgr/inc/wlan_policy_mgr_api.h      | 19 +++++++++
+ .../policy_mgr/src/wlan_policy_mgr_action.c   | 42 +++++++++++++++++++
+ .../core/hdd/src/wlan_hdd_cfg80211.c          | 18 ++++++--
+ 3 files changed, 76 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/inc/wlan_policy_mgr_api.h b/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/inc/wlan_policy_mgr_api.h
+index d902f7ee4327..5c7c35e8e190 100644
+--- a/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/inc/wlan_policy_mgr_api.h
++++ b/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/inc/wlan_policy_mgr_api.h
+@@ -517,6 +517,25 @@ bool policy_mgr_is_chnl_in_diff_band(struct wlan_objmgr_psoc *psoc,
+ bool policy_mgr_check_for_session_conc(struct wlan_objmgr_psoc *psoc,
+ 				       uint8_t session_id, uint32_t ch_freq);
+ 
++/**
++ * policy_mgr_is_hw_mode_change_required_for_channel_switch() - Check if HW mode change is needed for channel switch
++ * @psoc: PSOC object pointer
++ * @vdev_id: VDEV identifier
++ * @chan_freq: Channel frequency to switch to
++ * @reason: Reason for mode change request
++ *
++ * This function checks whether a hardware mode change is required when switching
++ * to the specified channel on the given vdev. It avoids unnecessary transitions,
++ * especially useful when operating in monitor mode.
++ *
++ * Return: true if HW mode change is needed, false otherwise.
++ */
++bool policy_mgr_is_hw_mode_change_required_for_channel_switch(
++	struct wlan_objmgr_psoc *psoc,
++	uint8_t vdev_id,
++	uint32_t chan_freq,
++	uint32_t reason);
++
+ /**
+  * policy_mgr_handle_conc_multiport() - to handle multiport concurrency
+  * @session_id: Session ID
+diff --git a/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/src/wlan_policy_mgr_action.c b/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/src/wlan_policy_mgr_action.c
+index 83d38f48f2ad..21c254091cd1 100644
+--- a/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/src/wlan_policy_mgr_action.c
++++ b/drivers/staging/qcacld-3.0/components/cmn_services/policy_mgr/src/wlan_policy_mgr_action.c
+@@ -934,6 +934,48 @@ policy_mgr_is_hw_mode_change_required(struct wlan_objmgr_psoc *psoc,
+ 	return false;
+ }
+ 
++/*
++ * Check if HW mode change is needed for channel switching,
++ * avoiding unnecessary transitions in monitor mode
++ */
++bool policy_mgr_is_hw_mode_change_required_for_channel_switch(
++	struct wlan_objmgr_psoc *psoc,
++	uint8_t vdev_id,
++	uint32_t chan_freq,
++	uint32_t reason)
++{
++	struct wlan_objmgr_vdev *vdev;
++	enum QDF_OPMODE opmode;
++	struct wlan_channel *chan;
++	uint32_t current_chan = 0;
++
++	if (!psoc) {
++		policy_mgr_err("psoc is NULL");
++		return false;
++	}
++
++	vdev = wlan_objmgr_get_vdev_by_id_from_psoc(psoc, vdev_id, WLAN_POLICY_MGR_ID);
++	if (!vdev) {
++		policy_mgr_err("vdev is NULL for vdev_id %d", vdev_id);
++		return false;
++	}
++
++	opmode = wlan_vdev_mlme_get_opmode(vdev);
++
++	chan = wlan_vdev_get_active_channel(vdev);
++	if (chan)
++		current_chan = chan->ch_freq;
++
++	wlan_objmgr_vdev_release_ref(vdev, WLAN_POLICY_MGR_ID);
++
++	/* If we're in monitor mode and already on the desired channel — no HW mode change needed */
++	if (opmode == QDF_MONITOR_MODE && current_chan == chan_freq)
++		return false;
++
++	/* Otherwise — a change might be required */
++	return true;
++}
++
+ static uint32_t
+ policy_mgr_check_for_hw_mode_change(struct wlan_objmgr_psoc *psoc,
+ 				    qdf_list_t *scan_list, uint8_t vdev_id)
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+index ecfb0d40b4c7..38006676b31b 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -24898,11 +24898,23 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
+ 	wlan_reg_set_channel_params_for_freq(hdd_ctx->pdev,
+ 					     chandef->chan->center_freq,
+ 					     sec_ch_2g_freq, &ch_params);
+-	if (wlan_hdd_change_hw_mode_for_given_chnl(adapter,
++
++	/*
++	 * Skip HW mode change if not required, to avoid unnecessary
++	 * MCC/SCC/DBS transitions. This helps in cases where monitor
++	 * mode is started on a channel that is already active on
++	 * another interface.
++	 */
++	if (policy_mgr_is_hw_mode_change_required_for_channel_switch(
++		hdd_ctx->psoc, adapter->vdev_id,
++		chandef->chan->center_freq,
++		POLICY_MGR_UPDATE_REASON_SET_OPER_CHAN)) {
++		if (wlan_hdd_change_hw_mode_for_given_chnl(adapter,
+ 						   chandef->chan->center_freq,
+ 						   POLICY_MGR_UPDATE_REASON_SET_OPER_CHAN)) {
+-		hdd_err("Failed to change hw mode");
+-		return -EINVAL;
++			hdd_err("Failed to change hw mode");
++			return -EINVAL;
++		}
+ 	}
+ 
+ 	if (adapter->monitor_mode_vdev_up_in_progress) {
+-- 
+2.51.0
+

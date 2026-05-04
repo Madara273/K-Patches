@@ -1,0 +1,27 @@
+From d9bae47e2c364caf7aea2a5251e36cd6f5b8cc27 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Sun, 8 Mar 2026 19:17:31 +0000
+Subject: [PATCH 09/15] staging: qcacld-3.0: Fix warning about uninitialized
+ variable.
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index 334d54cc0be8..709760de21f9 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -17000,7 +17000,7 @@ static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
+ 	static const char wlan_on_str[] = "ON";
+ 	int ret;
+ 	unsigned long rc;
+-	struct hdd_context *hdd_ctx;
++	struct hdd_context *hdd_ctx = NULL;
+ 	bool monitor_active = false;
+ 	bool monitor_mode_global = false;
+ 	bool turning_on = false;
+-- 
+2.51.0
+

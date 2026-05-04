@@ -1,0 +1,77 @@
+From 9b4e223a1ccff7ed063a73094c058022a3166b46 Mon Sep 17 00:00:00 2001
+From: Madara273 <ravenhoxs@gmail.com>
+Date: Thu, 7 Aug 2025 06:14:04 +0000
+Subject: [PATCH 01/15] qcacld-3.0: refactoring of channel width checking via
+ switch
+
+Signed-off-by: Madara273 <ravenhoxs@gmail.com>
+---
+ .../core/hdd/src/wlan_hdd_cfg80211.c          | 20 ++++++++++++++++---
+ .../qcacld-3.0/core/hdd/src/wlan_hdd_main.c   | 20 ++++++++++++++++---
+ 2 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+index 35bb081b584a..ecfb0d40b4c7 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_cfg80211.c
+@@ -24843,9 +24843,23 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
+ 	/* Verify the BW before accepting this request */
+ 	ch_width = hdd_map_nl_chan_width(chandef->width);
+ 
+-	if (ch_width > CH_WIDTH_10MHZ ||
+-	   (!cds_is_sub_20_mhz_enabled() && ch_width > CH_WIDTH_160MHZ)) {
+-		hdd_err("invalid BW received %d", ch_width);
++	switch (ch_width) {
++	case CH_WIDTH_5MHZ:
++	case CH_WIDTH_10MHZ:
++		if (!cds_is_sub_20_mhz_enabled()) {
++			hdd_err("Sub-20MHz not supported, but got BW %d", ch_width);
++			return -EINVAL;
++		}
++		break;
++
++	case CH_WIDTH_20MHZ:
++	case CH_WIDTH_40MHZ:
++	case CH_WIDTH_80MHZ:
++	case CH_WIDTH_160MHZ:
++		break;
++
++	default:
++		hdd_err("Unsupported channel width received: %d", ch_width);
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+index 3ff3bb898c59..d60dffc23059 100644
+--- a/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
++++ b/drivers/staging/qcacld-3.0/core/hdd/src/wlan_hdd_main.c
+@@ -8490,9 +8490,23 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
+ 	/* Verify the BW before accepting this request */
+ 	ch_width = bandwidth;
+ 
+-	if (ch_width > CH_WIDTH_10MHZ ||
+-	   (!cds_is_sub_20_mhz_enabled() && ch_width > CH_WIDTH_160MHZ)) {
+-		hdd_err("invalid BW received %d", ch_width);
++	switch (ch_width) {
++	case CH_WIDTH_5MHZ:
++	case CH_WIDTH_10MHZ:
++		if (!cds_is_sub_20_mhz_enabled()) {
++			hdd_err("Sub-20MHz not supported, but got BW %d", ch_width);
++			return -EINVAL;
++		}
++		break;
++
++	case CH_WIDTH_20MHZ:
++	case CH_WIDTH_40MHZ:
++	case CH_WIDTH_80MHZ:
++	case CH_WIDTH_160MHZ:
++		break;
++
++	default:
++		hdd_err("Unsupported channel width received: %d", ch_width);
+ 		return -EINVAL;
+ 	}
+ 
+-- 
+2.51.0
+
